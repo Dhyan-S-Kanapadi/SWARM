@@ -15,10 +15,16 @@ from backend.state import ProjectState, create_project_state, utc_now_iso
 from backend.utils import (
     collect_artifact_summary,
     get_generated_app_dir,
+    get_preview_status,
     get_run_output_dir,
+    install_preview_dependencies,
+    launch_preview,
     load_run_summary,
     materialize_generated_app,
+    prepare_preview_app,
     score_generated_app_quality,
+    start_preview,
+    stop_preview,
     validate_generated_app,
     zip_generated_app,
 )
@@ -130,6 +136,38 @@ def create_app() -> FastAPI:
         state = _get_run_or_404(run_id)
         _ensure_generated_app_materialized(state)
         return score_generated_app_quality(run_id, state)
+
+    @api.post("/preview/{run_id}/prepare")
+    def prepare_run_preview(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        return prepare_preview_app(run_id, state.get("generated_files", {}))
+
+    @api.post("/preview/{run_id}/install")
+    def install_run_preview(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        return install_preview_dependencies(run_id)
+
+    @api.post("/preview/{run_id}/start")
+    def start_run_preview(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        return start_preview(run_id)
+
+    @api.post("/preview/{run_id}/stop")
+    def stop_run_preview(run_id: str) -> dict[str, Any]:
+        _get_run_or_404(run_id)
+        return stop_preview(run_id)
+
+    @api.post("/preview/{run_id}/launch")
+    def launch_run_preview(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        return launch_preview(run_id, state.get("generated_files", {}))
+
+    @api.get("/preview/{run_id}/status")
+    def get_run_preview_status(run_id: str) -> dict[str, Any]:
+        _get_run_or_404(run_id)
+        return get_preview_status(run_id)
 
     return api
 

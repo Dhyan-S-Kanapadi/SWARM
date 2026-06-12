@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import zipfile
@@ -17,6 +18,10 @@ RUN_SUMMARY_FILE = "summary.json"
 GENERATED_APP_DIR = "generated-app"
 VALIDATION_FILE = "validation.json"
 QUALITY_FILE = "quality.json"
+PREVIEW_API_PORT = 3001
+PREVIEW_FRONTEND_PORT = 6200
+PREVIEW_FILE = "preview.json"
+PREVIEW_PROCESSES: dict[str, dict[str, subprocess.Popen[str]]] = {}
 
 
 def ensure_output_root(root: str | Path | None = None) -> Path:
@@ -312,6 +317,148 @@ def score_generated_app_quality(
     return result
 
 
+def prepare_preview_app(
+    run_id: str,
+    generated_files: dict[str, str] | None = None,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Ensure the generated app exists for preview."""
+    app_dir = get_generated_app_dir(run_id, root)
+    if not app_dir.exists() and generated_files:
+        app_dir = materialize_generated_app(run_id, generated_files, root)
+
+    result = {
+        "run_id": run_id,
+        "status": "prepared" if app_dir.exists() else "missing",
+        "app_dir": str(app_dir),
+        "package_json": str(app_dir / "package.json"),
+        "package_json_exists": (app_dir / "package.json").exists(),
+    }
+    _write_preview_status(run_id, result, root)
+    return result
+
+
+def install_preview_dependencies(
+    run_id: str,
+    root: str | Path | None = None,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    """Install generated app dependencies for preview."""
+    app_dir = get_generated_app_dir(run_id, root)
+    if not app_dir.exists():
+        return _write_preview_status(
+            run_id,
+            {"run_id": run_id, "status": "missing", "error": "Generated app directory does not exist."},
+            root,
+        )
+
+    command_result = _run_command(["npm", "install"], app_dir, timeout_seconds)
+    status = "installed" if command_result["returncode"] == 0 else "install_failed"
+    result = {
+        "run_id": run_id,
+        "status": status,
+        "app_dir": str(app_dir),
+        "install": command_result,
+    }
+    return _write_preview_status(run_id, result, root)
+
+
+def start_preview(
+    run_id: str,
+    root: str | Path | None = None,
+    api_port: int = PREVIEW_API_PORT,
+    frontend_port: int = PREVIEW_FRONTEND_PORT,
+) -> dict[str, Any]:
+    """Start generated Express API and Vite frontend preview processes."""
+    app_dir = get_generated_app_dir(run_id, root)
+    if not app_dir.exists():
+        return _write_preview_status(
+            run_id,
+            {"run_id": run_id, "status": "missing", "error": "Generated app directory does not exist."},
+            root,
+        )
+
+    stop_preview(run_id, root)
+    run_dir = get_run_output_dir(run_id, root, create=False)
+    log_dir = run_dir / "preview-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    api_process = _start_preview_process(
+        ["npm", "run", "server"],
+        app_dir,
+        log_dir / "api.log",
+        {"PORT": str(api_port)},
+    )
+    frontend_process = _start_preview_process(
+        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", str(frontend_port)],
+        app_dir,
+        log_dir / "frontend.log",
+        {"VITE_API_BASE": f"http://127.0.0.1:{api_port}"},
+    )
+
+    PREVIEW_PROCESSES[run_id] = {"api": api_process, "frontend": frontend_process}
+    time.sleep(1)
+    return get_preview_status(run_id, root)
+
+
+def launch_preview(
+    run_id: str,
+    generated_files: dict[str, str] | None = None,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Prepare, install, and start generated app preview."""
+    prepared = prepare_preview_app(run_id, generated_files, root)
+    if prepared["status"] != "prepared":
+        return prepared
+
+    installed = install_preview_dependencies(run_id, root)
+    if installed["status"] != "installed":
+        return installed
+
+    return start_preview(run_id, root)
+
+
+def stop_preview(run_id: str, root: str | Path | None = None) -> dict[str, Any]:
+    """Stop preview processes for a run."""
+    processes = PREVIEW_PROCESSES.pop(run_id, {})
+    stopped: dict[str, Any] = {}
+    for name, process in processes.items():
+        stopped[name] = _stop_process(process)
+
+    status = get_preview_status(run_id, root)
+    result = {
+        **status,
+        "status": "stopped",
+        "stopped": stopped,
+    }
+    return _write_preview_status(run_id, result, root)
+
+
+def get_preview_status(run_id: str, root: str | Path | None = None) -> dict[str, Any]:
+    """Return current preview status and URLs."""
+    app_dir = get_generated_app_dir(run_id, root)
+    processes = PREVIEW_PROCESSES.get(run_id, {})
+    api = _process_status(processes.get("api"))
+    frontend = _process_status(processes.get("frontend"))
+    running = api.get("running", False) and frontend.get("running", False)
+    result = {
+        "run_id": run_id,
+        "status": "running" if running else "stopped",
+        "app_dir": str(app_dir),
+        "prepared": app_dir.exists(),
+        "installed": (app_dir / "node_modules").exists(),
+        "frontend_url": f"http://127.0.0.1:{PREVIEW_FRONTEND_PORT}",
+        "api_url": f"http://127.0.0.1:{PREVIEW_API_PORT}",
+        "api_health_url": f"http://127.0.0.1:{PREVIEW_API_PORT}/api/health",
+        "api_metrics_url": f"http://127.0.0.1:{PREVIEW_API_PORT}/api/metrics",
+        "processes": {
+            "api": api,
+            "frontend": frontend,
+        },
+    }
+    return _write_preview_status(run_id, result, root)
+
+
 def _run_command(command: list[str], cwd: Path, timeout_seconds: int) -> dict[str, Any]:
     started = time.monotonic()
     executable = shutil.which(command[0]) or command[0]
@@ -342,6 +489,75 @@ def _run_command(command: list[str], cwd: Path, timeout_seconds: int) -> dict[st
             "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
             "error": f"Command timed out after {timeout_seconds} seconds.",
         }
+
+
+def _start_preview_process(
+    command: list[str],
+    cwd: Path,
+    log_path: Path,
+    env_overrides: dict[str, str],
+) -> subprocess.Popen[str]:
+    executable = shutil.which(command[0]) or command[0]
+    resolved_command = [executable, *command[1:]]
+    env = {**os.environ, **env_overrides}
+    log_file = log_path.open("a", encoding="utf-8")
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    return subprocess.Popen(
+        resolved_command,
+        cwd=cwd,
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        shell=False,
+        creationflags=creationflags,
+    )
+
+
+def _stop_process(process: subprocess.Popen[str]) -> dict[str, Any]:
+    if process.poll() is not None:
+        return {"pid": process.pid, "returncode": process.returncode, "was_running": False}
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    else:
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    return {"pid": process.pid, "returncode": process.poll(), "was_running": True}
+
+
+def _process_status(process: subprocess.Popen[str] | None) -> dict[str, Any]:
+    if process is None:
+        return {"running": False, "pid": None, "returncode": None}
+    return {
+        "running": process.poll() is None,
+        "pid": process.pid,
+        "returncode": process.poll(),
+    }
+
+
+def _write_preview_status(
+    run_id: str,
+    status: dict[str, Any],
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    run_dir = get_run_output_dir(run_id, root)
+    write_json(run_dir / PREVIEW_FILE, status)
+    return status
 
 
 def _artifact_file(path: Path) -> dict[str, Any]:
