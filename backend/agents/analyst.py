@@ -145,7 +145,16 @@ def fallback_requirements(idea: str) -> dict:
 
 def infer_business_type(idea: str) -> str:
     lowered = idea.lower()
-    for keyword in ("bakery", "fitness", "photography", "clinic", "salon", "restaurant", "tuition", "coach"):
-        if keyword in lowered:
-            return keyword
+    keyword_profiles = [
+        (("bakery", "cake", "baker"), "bakery"),
+        (("salon", "saloon", "beauty", "spa", "hair", "makeup", "barber"), "salon"),
+        (("clinic", "doctor", "patient", "dental", "health"), "clinic"),
+        (("fitness", "fitness center", "fitness centre", "gym", "workout", "trainer", "yoga", "zumba"), "gym / fitness center"),
+        (("restaurant", "cafe", "food", "dining", "table", "menu", "kitchen", "takeaway"), "restaurant"),
+        (("coaching center", "coaching centre", "coaching", "tuition", "school", "student", "academy"), "coaching center"),
+        (("photography", "photo", "shoot"), "photography"),
+    ]
+    for keywords, business_type in keyword_profiles:
+        if any(keyword in lowered for keyword in keywords):
+            return business_type
     return "local business"

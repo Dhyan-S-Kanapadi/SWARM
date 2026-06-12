@@ -6,8 +6,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Root = "D:\SWARM.AI"
-$Python = Join-Path $Root ".venv\Scripts\python.exe"
+$Root = Split-Path -Parent $PSScriptRoot
+$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$Python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
 $BackendUrl = "http://127.0.0.1:$BackendPort"
 $FrontendUrl = "http://127.0.0.1:$FrontendPort"
 
