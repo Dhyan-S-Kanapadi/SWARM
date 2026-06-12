@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,71 @@ def read_json(path: str | Path, default: Any = None) -> Any:
     if not source.exists():
         return default
     return json.loads(source.read_text(encoding="utf-8"))
+
+
+def strip_markdown_fences(text: str) -> str:
+    """Remove a single wrapping Markdown code fence from text."""
+    stripped = text.strip()
+    fence_match = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    return stripped
+
+
+def extract_json_text(text: str) -> str:
+    """Extract the first complete JSON object or array from model output."""
+    stripped = strip_markdown_fences(text)
+    starts = [index for index in (stripped.find("{"), stripped.find("[")) if index != -1]
+    if not starts:
+        raise ValueError("No JSON object or array found in text.")
+
+    start = min(starts)
+    opening = stripped[start]
+    closing = "}" if opening == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start, len(stripped)):
+        char = stripped[index]
+
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+
+    raise ValueError("JSON text is incomplete.")
+
+
+def repair_json_text(text: str) -> str:
+    """Apply conservative repairs for common LLM JSON formatting mistakes."""
+    repaired = extract_json_text(text)
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    repaired = repaired.replace("\u201c", '"').replace("\u201d", '"')
+    repaired = repaired.replace("\u2018", "'").replace("\u2019", "'")
+    return repaired
+
+
+def parse_json_text(text: str) -> Any:
+    """Parse JSON from raw text, fenced Markdown, or prose-wrapped output."""
+    json_text = extract_json_text(text)
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        return json.loads(repair_json_text(json_text))
 
 
 def write_text(path: str | Path, content: str) -> Path:
