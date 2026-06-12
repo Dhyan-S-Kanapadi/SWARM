@@ -9,8 +9,9 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.graph import run_workflow
 from backend.state import ProjectState, create_project_state, utc_now_iso
-from backend.utils import get_run_output_dir, load_run_summary, write_run_summary
+from backend.utils import get_run_output_dir, load_run_summary
 
 RUN_STORE: dict[str, ProjectState] = {}
 
@@ -50,7 +51,7 @@ def create_app() -> FastAPI:
         state["status"] = "queued"
         RUN_STORE[run_id] = state
 
-        background_tasks.add_task(run_placeholder_workflow, run_id)
+        background_tasks.add_task(run_background_workflow, run_id)
 
         return {
             "run_id": run_id,
@@ -91,28 +92,20 @@ def create_app() -> FastAPI:
     return api
 
 
-def run_placeholder_workflow(run_id: str) -> None:
-    """Placeholder workflow until LangGraph agents are added."""
+def run_background_workflow(run_id: str) -> None:
+    """Run the LangGraph workflow for a stored run."""
     state = RUN_STORE.get(run_id)
     if state is None:
         return
 
-    now = utc_now_iso()
-    state["status"] = "running"
-    state["updated_at"] = now
-
-    summary = {
-        "run_id": run_id,
-        "status": "complete",
-        "message": "Workflow placeholder completed. LangGraph agents are added in a later milestone.",
-        "prompt": state["prompt"],
-        "completed_at": utc_now_iso(),
-    }
-    write_run_summary(run_id, summary)
-
-    state["summary"] = summary
-    state["status"] = "complete"
-    state["updated_at"] = summary["completed_at"]
+    try:
+        state["status"] = "running"
+        state["updated_at"] = utc_now_iso()
+        RUN_STORE[run_id] = run_workflow(state)
+    except Exception as exc:  # pragma: no cover - defensive background guard
+        state["status"] = "failed"
+        state["updated_at"] = utc_now_iso()
+        state.setdefault("errors", []).append(str(exc))
 
 
 def _get_run_or_404(run_id: str) -> ProjectState:
