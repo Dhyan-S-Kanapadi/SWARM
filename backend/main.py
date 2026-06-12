@@ -6,12 +6,22 @@ from copy import deepcopy
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.graph import run_workflow
 from backend.state import ProjectState, create_project_state, utc_now_iso
-from backend.utils import get_run_output_dir, load_run_summary
+from backend.utils import (
+    collect_artifact_summary,
+    get_generated_app_dir,
+    get_run_output_dir,
+    load_run_summary,
+    materialize_generated_app,
+    score_generated_app_quality,
+    validate_generated_app,
+    zip_generated_app,
+)
 
 RUN_STORE: dict[str, ProjectState] = {}
 
@@ -89,6 +99,38 @@ def create_app() -> FastAPI:
         )
         return {"runs": [deepcopy(run) for run in runs]}
 
+    @api.get("/artifacts/{run_id}")
+    def get_artifacts(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        return collect_artifact_summary(run_id, state)
+
+    @api.get("/download/{run_id}")
+    def download_generated_app(run_id: str) -> FileResponse:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        try:
+            zip_path = zip_generated_app(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=f"swarm-generated-app-{run_id}.zip",
+        )
+
+    @api.post("/validate/{run_id}")
+    def validate_run(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        return validate_generated_app(run_id)
+
+    @api.post("/quality/{run_id}")
+    def score_run_quality(run_id: str) -> dict[str, Any]:
+        state = _get_run_or_404(run_id)
+        _ensure_generated_app_materialized(state)
+        return score_generated_app_quality(run_id, state)
+
     return api
 
 
@@ -113,6 +155,18 @@ def _get_run_or_404(run_id: str) -> ProjectState:
     if state is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return deepcopy(state)
+
+
+def _ensure_generated_app_materialized(state: ProjectState) -> None:
+    run_id = state["run_id"]
+    app_dir = get_generated_app_dir(run_id)
+    if app_dir.exists():
+        return
+
+    generated_files = state.get("generated_files", {})
+    if not generated_files:
+        raise HTTPException(status_code=404, detail="Generated app not found")
+    materialize_generated_app(run_id, generated_files)
 
 
 app = create_app()
