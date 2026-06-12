@@ -11,6 +11,8 @@ class ProjectState(TypedDict, total=False):
     builder_prompt: str
     code_files: dict[str, str]
     pitch_deck: dict[str, Any]
+    llm_calls: list[dict[str, Any]]
+    fatal_error: bool
     current_agent: str
     agent_statuses: dict[str, AgentStatus]
     errors: list[str]

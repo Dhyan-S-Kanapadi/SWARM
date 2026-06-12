@@ -1,6 +1,6 @@
 import json
 
-from backend.agents.llm import call_groq_json
+from backend.agents.llm import allow_llm_fallback, call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -17,10 +17,16 @@ def run_architect(state: ProjectState) -> ProjectState:
             temperature=0.25,
             max_tokens=MAX_TOKENS,
         )
+        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
+        if not allow_llm_fallback():
+            set_agent_status(state, "architect", "error")
+            state["fatal_error"] = True
+            raise
         state.setdefault("errors", []).append(f"Architect used fallback after LLM error: {exc}")
         state["architecture"] = fallback_architecture(state.get("requirements", {}))
+        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "fallback"})
         complete_agent(state, "architect")
 
     write_json(state["run_id"], "architecture.json", state["architecture"])

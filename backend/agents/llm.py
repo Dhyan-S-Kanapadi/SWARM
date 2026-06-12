@@ -3,15 +3,25 @@ import re
 import time
 from typing import Any
 
+from dotenv import load_dotenv
 from groq import Groq
 
 from backend.utils import parse_json_response
+
+load_dotenv()
 
 DEFAULT_MODEL = "llama-3.1-8b-instant"
 DEFAULT_FALLBACK_MODELS = "llama-3.1-8b-instant"
 DEFAULT_TIMEOUT_SECONDS = 45
 DEFAULT_RATE_LIMIT_RETRY_SECONDS = 20
 DEFAULT_REQUEST_TOKEN_BUDGET = 5600
+PLACEHOLDER_API_KEYS = {
+    "",
+    "your_groq_api_key_here",
+    "your-groq-api-key-here",
+    "replace_me",
+    "changeme",
+}
 AGENT_MIN_TOKENS = {
     "analyst": 2200,
     "architect": 2400,
@@ -23,6 +33,21 @@ class LLMUnavailableError(RuntimeError):
     pass
 
 
+def groq_api_key() -> str:
+    raw_key = os.getenv("GROQ_API_KEY", "").strip().strip('"').strip("'")
+    if raw_key.lower() in PLACEHOLDER_API_KEYS:
+        return ""
+    return raw_key
+
+
+def groq_configured() -> bool:
+    return bool(groq_api_key())
+
+
+def allow_llm_fallback() -> bool:
+    return os.getenv("SWARM_ALLOW_LLM_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def call_groq_json(
     *,
     agent_name: str,
@@ -31,7 +56,7 @@ def call_groq_json(
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = groq_api_key()
     if not api_key:
         raise LLMUnavailableError("GROQ_API_KEY is not set")
 

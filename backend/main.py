@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.graph import workflow
+from backend.agents.llm import allow_llm_fallback, groq_configured
 from backend.state import ProjectState, initial_agent_statuses
 from backend.utils import (
     OUTPUTS_DIR,
@@ -53,7 +54,9 @@ def execute_workflow(run_id: str) -> None:
     try:
         final_state = workflow.invoke(state)
         builder_status = final_state.get("agent_statuses", {}).get("builder")
-        if builder_status == "waiting_for_trae":
+        if final_state.get("fatal_error"):
+            final_state["done"] = True
+        elif builder_status == "waiting_for_trae":
             final_state["current_agent"] = "builder"
             final_state["done"] = False
         else:
@@ -81,6 +84,7 @@ def run_project(payload: RunRequest, background_tasks: BackgroundTasks) -> dict[
         "builder_prompt": "",
         "code_files": {},
         "pitch_deck": {},
+        "llm_calls": [],
         "current_agent": "queued",
         "agent_statuses": initial_agent_statuses(),
         "errors": [],
@@ -101,7 +105,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "service": "SWARM.AI backend",
-        "groq_configured": bool(os.getenv("GROQ_API_KEY")),
+        "groq_configured": groq_configured(),
+        "llm_fallback_enabled": allow_llm_fallback(),
         "builder_mode": "internal",
         "outputs_dir": str(OUTPUTS_DIR),
     }
@@ -138,6 +143,7 @@ def get_status(run_id: str) -> dict:
         "current_agent": state.get("current_agent", "unknown"),
         "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
         "errors": state.get("errors", []),
+        "llm_calls": state.get("llm_calls", []),
         "done": state.get("done", False),
         "created_at": state.get("created_at"),
         "updated_at": state.get("updated_at"),
@@ -156,6 +162,7 @@ def get_output(run_id: str) -> dict:
         "code_files": state.get("code_files", {}),
         "pitch_deck": state.get("pitch_deck", {}),
         "errors": state.get("errors", []),
+        "llm_calls": state.get("llm_calls", []),
         "done": state.get("done", False),
     }
 

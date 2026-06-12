@@ -10,11 +10,15 @@ from backend.utils import append_error, write_run_summary
 
 def _safe_node(name: str, fn):
     def wrapped(state: ProjectState) -> ProjectState:
+        if state.get("fatal_error"):
+            write_run_summary(state)
+            return state
         try:
             next_state = fn(state)
         except Exception as exc:
             append_error(state, f"{name} node failed: {exc}")
             state["current_agent"] = name
+            state["fatal_error"] = True
             next_state = state
         write_run_summary(next_state)
         return next_state

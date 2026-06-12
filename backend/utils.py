@@ -120,6 +120,7 @@ def write_run_summary(state: dict[str, Any]) -> None:
         "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
         "done": state.get("done", False),
         "errors": state.get("errors", []),
+        "llm_calls": state.get("llm_calls", []),
         "created_at": state.get("created_at"),
         "updated_at": state.get("updated_at"),
         "has_requirements": bool(state.get("requirements")),
@@ -168,6 +169,7 @@ def load_run_from_disk(run_id: str) -> ProjectState | None:
         "current_agent": summary.get("current_agent", "unknown"),
         "agent_statuses": summary.get("agent_statuses", initial_agent_statuses()),
         "errors": summary.get("errors", []),
+        "llm_calls": summary.get("llm_calls", []),
         "done": summary.get("done", False),
         "created_at": summary.get("created_at", ""),
         "updated_at": summary.get("updated_at", ""),
@@ -224,6 +226,7 @@ def build_artifact_summary(run_id: str) -> dict[str, Any]:
         "current_agent": state.get("current_agent", "unknown"),
         "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
         "errors": state.get("errors", []),
+        "llm_calls": state.get("llm_calls", []),
         "created_at": state.get("created_at", ""),
         "updated_at": state.get("updated_at", ""),
         "artifact_counts": {
@@ -266,6 +269,7 @@ def build_demo_summary(run_id: str) -> dict[str, Any]:
             "current_agent": state.get("current_agent", "unknown"),
             "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
             "errors": state.get("errors", []),
+            "llm_calls": state.get("llm_calls", []),
         },
         "story": {
             "problem": requirements.get("problem_statement", ""),
