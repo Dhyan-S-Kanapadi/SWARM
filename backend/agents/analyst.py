@@ -35,6 +35,8 @@ def fallback_requirements(idea: str) -> dict:
     business_type = infer_business_type(idea)
     if business_type == "bakery":
         return bakery_fallback_requirements(idea)
+    if business_type == "salon":
+        return saloon_fallback_requirements(idea)
     return {
         "problem_statement": f"{business_type.title()} teams need a simple way to manage daily work, customer follow-ups, due dates, and revenue without spreadsheets or missed commitments.",
         "target_audience": f"Local {business_type} owners, staff, and solo operators who need a practical app in their own language.",
@@ -139,6 +141,119 @@ def fallback_requirements(idea: str) -> dict:
         "acceptance_criteria": [
             "User can create, edit, delete, search, and filter records.",
             "Dashboard metrics update from saved records.",
+            "App supports English, Hindi, and Kannada UI labels.",
+            "Generated project passes check, test, and build scripts.",
+        ],
+    }
+
+
+def saloon_fallback_requirements(idea: str) -> dict:
+    return {
+        "problem_statement": "Salon and saloon teams need one place to manage appointments, walk-in queues, services, staff assignment, payment status, and client follow-ups without mixing bookings in notebooks or chat messages.",
+        "target_audience": "Local salon owners, reception staff, stylists, makeup artists, barbers, and spa staff who manage daily appointments and customer service flow.",
+        "local_context": {
+            "geography": "India-first local salon context",
+            "business_type": "salon",
+            "operating_reality": "Small salon teams take bookings through walk-ins, phone calls, WhatsApp, and Instagram while coordinating stylists, service rooms, and payments.",
+            "language_needs": "English plus Hindi and Kannada labels for staff comfort.",
+            "device_constraints": "Must work on laptop and mobile-width browser screens with low setup complexity.",
+        },
+        "primary_personas": [
+            {
+                "name": "Salon Owner",
+                "role": "Business decision maker",
+                "goals": ["Track appointments and revenue", "Avoid double bookings", "See staff workload"],
+                "pains": ["Missed appointments", "Unclear payment status", "No daily queue view"],
+                "permissions": ["create", "edit", "delete", "view metrics"],
+            },
+            {
+                "name": "Reception Staff",
+                "role": "Appointment coordinator",
+                "goals": ["Book clients quickly", "Assign staff and services", "Update queue status"],
+                "pains": ["Repeated phone checks", "Manual notes", "Language friction"],
+                "permissions": ["create", "edit", "view"],
+            },
+        ],
+        "core_features": [
+            "salon appointment management",
+            "walk-in and appointment queue tracking",
+            "client phone, preferences, and follow-up notes",
+            "service type and staff assignment",
+            "appointment date and time scheduling",
+            "payment status and salon revenue dashboard",
+            "search and filters by status, priority, payment, service, and appointment date",
+            "English, Hindi, and Kannada language switcher",
+            "realistic salon seed data and reset demo flow",
+        ],
+        "user_stories": [
+            "As a salon owner, I want to see today's appointments so that staff workload is clear.",
+            "As reception staff, I want to create a haircut, makeup, spa, or barber appointment with time and staff so that clients are served on schedule.",
+            "As a salon owner, I want payment status metrics so that pending collections are visible.",
+            "As staff, I want local-language labels so that daily use is comfortable.",
+        ],
+        "workflow_map": [
+            {
+                "name": "Create salon appointment",
+                "trigger": "Client books a salon, saloon, spa, makeup, or barber service",
+                "actor": "Reception staff",
+                "steps": ["Enter client", "Select service", "Assign staff", "Set appointment date/time", "Save appointment"],
+                "expected_outcome": "Appointment appears in the queue and dashboard metrics.",
+            },
+            {
+                "name": "Daily appointment queue",
+                "trigger": "Start of salon day",
+                "actor": "Salon owner",
+                "steps": ["Open dashboard", "Review pending appointments", "Assign staff", "Update service status"],
+                "expected_outcome": "Team knows which clients are waiting, in service, and completed.",
+            },
+        ],
+        "data_entities": [
+            {
+                "name": "salon_appointment",
+                "purpose": "Tracks each haircut, beauty, spa, makeup, or barber appointment",
+                "important_fields": ["customerName", "phone", "serviceType", "staffName", "status", "priority", "appointmentDate", "appointmentTime", "amount", "paymentStatus", "notes"],
+                "relationships": ["belongs to client/contact", "assigned to staff member"],
+            }
+        ],
+        "business_rules": [
+            "client name is required",
+            "salon service is required",
+            "appointment date is required",
+            "appointment time is required",
+            "status must be one of new, confirmed, in_progress, completed",
+            "amount must be numeric",
+            "payment status must be pending, partial, or paid",
+        ],
+        "automation_requirements": [
+            {
+                "name": "appointment queue visibility",
+                "trigger": "dashboard load",
+                "action": "calculate upcoming non-completed salon appointments by appointment date and time",
+                "fallback": "show all open salon appointments",
+            }
+        ],
+        "localization_requirements": {
+            "default_language": "English",
+            "supported_languages": ["English", "Hindi", "Kannada"],
+            "copy_style": "simple salon operations language",
+            "local_terms": ["appointment", "service", "client", "staff", "payment", "appointment queue"],
+            "date_time_currency_format": "India date formatting and INR currency",
+        },
+        "mvp_scope": {
+            "included": ["dashboard", "CRUD salon appointments", "filters", "appointment queue", "local-language labels", "seed data", "local API"],
+            "excluded": ["payment gateway", "SMS gateway", "multi-user auth", "cloud deployment"],
+        },
+        "success_metrics": ["open salon appointments", "today's appointments", "completed services", "pending payments", "total revenue"],
+        "seed_data": [
+            "Hair styling appointment for this afternoon",
+            "Bridal makeup booking with partial payment",
+            "Facial package appointment awaiting confirmation",
+            "Completed color touch-up awaiting client feedback",
+        ],
+        "acceptance_criteria": [
+            "User can create, edit, delete, search, and filter salon appointments.",
+            "Dashboard metrics update from saved salon records.",
+            "Appointment queue shows upcoming appointments and assigned staff.",
             "App supports English, Hindi, and Kannada UI labels.",
             "Generated project passes check, test, and build scripts.",
         ],
