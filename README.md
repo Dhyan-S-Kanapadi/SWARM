@@ -1,283 +1,322 @@
 # SWARM.AI
 
-SWARM.AI is a local-business app factory. A user enters a plain-language business problem, and SWARM coordinates a small agent workflow that analyzes requirements, designs an architecture, generates a runnable app, and packages a pitch for the result.
+SWARM.AI is a local multi-agent MVP factory. A founder submits a raw startup idea, then a LangGraph workflow coordinates:
 
-The generated app is a React + Vite frontend with an Express API and local JSON persistence. It is designed for small local businesses that need a quick workflow tool for orders, appointments, visits, memberships, enrollments, or other operational records.
+1. Analyst Agent: turns the idea into structured product requirements using Groq.
+2. Architect Agent: turns requirements into a technical architecture using Groq.
+3. Builder Agent: generates a complete local React + Express MVP directly inside SWARM.AI.
+4. Pitcher Agent: turns all prior outputs into an investor-ready pitch deck using Groq after the generated app is created.
 
-## Project Overview
+The main demo flow no longer depends on Trae. Trae/MCP integrations remain available as optional legacy tooling, but SWARM.AI can now generate the MVP by itself after the user types an idea in the UI.
 
-SWARM.AI has two main surfaces:
-
-- `backend/`: FastAPI service, LangGraph workflow, agents, output utilities, preview management, validation, and quality scoring.
-- `frontend/`: React control panel for starting runs, tracking agent status, reviewing artifacts, launching previews, validating generated apps, scoring quality, browsing generated files, and downloading app zips.
-
-Each run creates a unique output directory under `outputs/<run_id>/` with JSON artifacts and a materialized generated app.
-
-## Architecture
+## Project Structure
 
 ```text
-User prompt
-  |
-  v
-React frontend
-  |
-  v
-FastAPI backend
-  |
-  v
-LangGraph workflow
-  |
-  +-- Analyst   -> requirements.json
-  +-- Architect -> architecture.json
-  +-- Builder   -> generated-app/
-  +-- Pitcher   -> pitch_deck.json
-  |
-  v
-outputs/<run_id>/
+backend/
+  main.py
+  graph.py
+  state.py
+  agents/
+  mcp/
+  prompts/
+  outputs/
+frontend/
+  src/
+  package.json
+requirements.txt
 ```
 
-Backend responsibilities:
+## Prerequisites
 
-- Accept app generation requests through `POST /run`.
-- Store run state in memory for the current server process.
-- Execute the LangGraph workflow in the background.
-- Persist artifacts under `outputs/`.
-- Materialize, zip, validate, score, and preview generated apps.
+- Python 3.11+
+- Node.js 20+
+- A Groq API key from the Groq Console: https://console.groq.com
+- Optional: Trae installed only if you want to test the legacy MCP handoff
 
-Frontend responsibilities:
+## Backend Setup
 
-- Submit prompts to the backend.
-- Poll run status and display agent progress.
-- Show requirements, architecture, pitch, artifacts, generated source files, validation results, and quality results.
-- Trigger generated app preview actions.
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+```
 
-## LangGraph Workflow
+Edit `.env`:
 
-The workflow is defined in `backend/graph.py` and runs in this order:
+```env
+GROQ_API_KEY=your_groq_api_key_here
+```
 
-1. `analyst`: turns the user prompt into structured requirements.
-2. `architect`: turns requirements into app architecture, API routes, schema, screens, workflows, and validation notes.
-3. `builder`: creates the complete generated app file map and writes it to disk.
-4. `pitcher`: summarizes the generated app as a pitch deck.
+Run the backend:
 
-Each node updates its agent status through the shared `ProjectState`. The compiled workflow marks the run complete and writes a final `summary.json`.
+```bash
+uvicorn backend.main:app --reload
+```
 
-## Groq Setup
+The API runs at `http://localhost:8000`.
 
-The Analyst, Architect, and Pitcher agents can call Groq for JSON completions through `backend/agents/llm.py`.
+## One-Command Local Demo
 
-`.env.example` documents the expected backend environment variables:
+After installing Python and frontend dependencies, use this launcher for the normal hackathon demo path:
 
 ```powershell
-Copy-Item .env.example .env
+powershell -ExecutionPolicy Bypass -File scripts\start_swarm_demo.ps1
 ```
 
-Set at least `GROQ_API_KEY` in the shell that starts the backend, or load the `.env` values with your preferred environment manager:
+It starts:
 
-```powershell
-$env:GROQ_API_KEY="your_groq_key_here"
-```
+- SWARM backend at `http://127.0.0.1:8000`
+- SWARM frontend at `http://127.0.0.1:5173`
+- Optional Trae auto-worker only when `-WithTraeWorker` is present
 
-Optional Groq settings:
+Expected user flow:
+
+1. Type an app idea in the SWARM UI.
+2. Analyst and Architect run inside SWARM.
+3. SWARM Builder generates a complete local app.
+4. Pitcher creates the investor-ready output.
+5. Preview, validation, and quality-gate workflows are available from the UI.
+
+## Optional Legacy Trae MCP
+
+Trae's MCP support is used in this project by letting Trae connect to SWARM.AI as an MCP server.
+
+The project includes `.trae/mcp.json`, which tells Trae to start:
 
 ```text
-GROQ_MODEL=llama-3.3-70b-versatile
-GROQ_MODELS=llama-3.3-70b-versatile,llama-3.1-8b-instant,gemma2-9b-it
-GROQ_TEMPERATURE=0
-GROQ_MAX_TOKENS=2048
-GROQ_TIMEOUT_SECONDS=30
-GROQ_RATE_LIMIT_RETRIES=2
-GROQ_RATE_LIMIT_DELAY_SECONDS=2
+D:\SWARM.AI\.venv\Scripts\python.exe D:\SWARM.AI\backend\mcp\swarm_server.py
 ```
 
-If `GROQ_API_KEY` is missing or a Groq JSON request fails, the agents fall back to deterministic outputs so the workflow can still complete locally.
+That MCP server exposes these tools to Trae:
 
-## Builder Behavior
+- `list_swarm_runs`
+- `get_builder_prompt`
+- `get_project_context`
+- `get_quality_report`
+- `get_submitted_code_files`
+- `submit_code_files`
+- `mark_builder_error`
 
-The Builder agent is internal and deterministic. It does not ask an LLM to write code. It uses the user prompt, requirements, architecture, and domain detection to generate a complete React + Express app.
+Workflow:
 
-Generated app files include:
+1. Start the SWARM.AI backend.
+2. Submit an idea with `POST /run`.
+3. Wait until the Builder status is `waiting_for_trae`.
+4. Keep Trae running on the demo/developer machine with `D:\SWARM.AI` open.
+5. Ensure Trae loads `.trae/mcp.json`.
+6. Ask Trae Builder to use the `swarm_ai` MCP server, call `get_builder_prompt`, build the project, then call `submit_code_files`.
+7. SWARM.AI marks Builder done, runs Pitcher, and completes the run.
 
-- `package.json`
-- `index.html`
-- `vite.config.js`
-- `README.md`
-- `server/index.js`
-- `server/dataStore.js`
-- `server/app.test.js`
-- `server/seed-data.json`
-- `src/main.jsx`
-- `src/api.js`
-- `src/i18n.js`
-- `src/App.jsx`
-- `src/styles.css`
-
-The generated app includes:
-
-- Dashboard metrics.
-- CRUD record management.
-- Search and status filtering.
-- Local JSON data storage.
-- Seed data.
-- Express API health and metrics routes.
-- Node test runner coverage for data store behavior.
-- Vite production build support.
-
-## Supported Domains
-
-The builder currently detects these local-business domains from the prompt:
-
-- Bakery
-- Salon, including common "saloon" spelling
-- Clinic
-- Fitness studio
-- Tuition center
-- Generic local business fallback
-
-Domain detection changes labels, record names, queue names, follow-up labels, services, seed data, and generated app copy.
-
-## Run Commands
-
-Install backend dependencies in your Python environment:
-
-```powershell
-pip install fastapi uvicorn langgraph groq pydantic
-```
-
-Install frontend dependencies:
-
-```powershell
-npm --prefix frontend install
-```
-
-Start the backend:
-
-```powershell
-$env:GROQ_API_KEY="your_groq_key_here"
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Start the SWARM frontend:
-
-```powershell
-npm --prefix frontend run dev
-```
-
-Open:
+Example prompt to Trae Builder:
 
 ```text
-http://127.0.0.1:5173
+Use the swarm_ai MCP server. Call get_builder_prompt for the latest SWARM.AI run, build the complete MVP described in that prompt, then call submit_code_files with every generated file.
 ```
 
-Health check:
+No Trae API key is required for this flow. Trae authenticates through its own IDE/session. The only required key for SWARM.AI's backend agents is `GROQ_API_KEY`.
+
+### Optional Trae Auto Worker
+
+Trae does not currently expose a reliable CLI/API in this setup, so SWARM.AI cannot directly command Trae through a backend call. For a local hackathon demo, use the Windows automation worker in `scripts/trae_auto_worker.ps1`.
+
+It watches the SWARM.AI backend for runs with:
+
+```json
+"builder": "waiting_for_trae"
+```
+
+Then it brings Trae to the foreground, pastes a run-specific instruction, and presses Enter. Trae still performs the build through the `swarm_ai` MCP server and submits files back with `submit_code_files`.
+
+Setup:
+
+1. Start the SWARM.AI backend.
+2. Open `D:\SWARM.AI` in Trae.
+3. Make sure Trae has loaded `.trae/mcp.json`.
+4. Click the Trae chat input once so it can receive pasted text.
+5. Run:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health
+powershell -ExecutionPolicy Bypass -File .\scripts\trae_auto_worker.ps1
 ```
 
-Start a run directly:
+Leave that worker running during the demo.
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/run -Method Post -ContentType "application/json" -Body '{"prompt":"Build a salon appointment tracker"}'
+This is full local demo automation after setup, but it is GUI automation. If Trae changes focus, changes its UI, or blocks pasted commands, the worker can fail. A production-grade version requires an official Trae CLI, API, or task-runner endpoint.
+
+### Legacy Direct Trae MCP Client
+
+`backend/mcp/trae_client.py` and `backend/mcp/mcp_config.json` are retained as a legacy direct-client adapter in case Trae later exposes a callable MCP server.
+
+Edit `backend/mcp/mcp_config.json` only if you have a real Trae MCP server command or URL.
+
+The default assumes a stdio server:
+
+```json
+{
+  "server_name": "trae.ai",
+  "transport": "stdio",
+  "timeout_seconds": 900,
+  "tool_name": "build_project",
+  "argument_name": "prompt",
+  "server": {
+    "command": "trae",
+    "args": ["mcp", "serve"],
+    "env": {
+      "TRAE_API_KEY": "${TRAE_API_KEY}"
+    }
+  }
+}
 ```
 
-## API Endpoints
+This is not the active hackathon flow. Adjust `command`, `args`, `tool_name`, and `argument_name` only if your Trae install exposes a real MCP server. If your trae.ai server exposes streamable HTTP, use:
 
-- `GET /health`: backend health check.
-- `POST /run`: start a new SWARM run.
-- `GET /status/{run_id}`: inspect current run state.
-- `GET /output/{run_id}`: fetch summary and workflow artifacts.
-- `GET /runs`: list in-memory runs for the active server process.
-- `GET /artifacts/{run_id}`: list persisted artifact files and generated app files.
-- `GET /download/{run_id}`: download the generated app zip.
-- `POST /validate/{run_id}`: run generated app checks.
-- `POST /quality/{run_id}`: score generated app quality.
-- `POST /preview/{run_id}/prepare`: materialize the generated app for preview.
-- `POST /preview/{run_id}/install`: install generated app dependencies.
-- `POST /preview/{run_id}/start`: start generated API and frontend preview processes.
-- `POST /preview/{run_id}/stop`: stop generated app preview processes.
-- `POST /preview/{run_id}/launch`: prepare, install, and start preview.
-- `GET /preview/{run_id}/status`: inspect preview status and URLs.
-
-## Preview Commands
-
-The backend preview utilities use:
-
-- Generated Express API: `http://127.0.0.1:3001`
-- Generated Vite frontend: `http://127.0.0.1:6200`
-
-From the SWARM frontend, use the preview controls for the selected run.
-
-From the API:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/prepare -Method Post
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/install -Method Post
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/start -Method Post
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/status
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/stop -Method Post
+```json
+{
+  "server_name": "trae.ai",
+  "transport": "streamable_http",
+  "timeout_seconds": 900,
+  "tool_name": "build_project",
+  "argument_name": "prompt",
+  "server": {
+    "url": "http://localhost:9000/mcp"
+  }
+}
 ```
 
-Shortcut:
+The MCP tool should return generated files as one of these shapes:
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/preview/<run_id>/launch -Method Post
+```json
+{ "files": { "path/to/file.ext": "file content" } }
 ```
 
-## Validation Flow
+or:
 
-Validation is implemented in `backend/utils.py` and runs inside `outputs/<run_id>/generated-app`.
+```json
+{ "files": [{ "path": "path/to/file.ext", "content": "file content" }] }
+```
 
-Commands executed:
+## Frontend Setup
 
-```text
+```bash
+cd frontend
 npm install
-npm run check
-npm run test
-npm run build
+npm run dev
 ```
 
-Results are persisted to:
+Open `http://localhost:5173`.
+
+If the backend is not on `http://localhost:8000`, create `frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+## API
+
+### `GET /health`
+
+Returns backend liveness and basic configuration state.
+
+```json
+{
+  "status": "ok",
+  "service": "SWARM.AI backend",
+  "groq_configured": true,
+  "outputs_dir": "backend/outputs"
+}
+```
+
+### `GET /runs`
+
+Returns known in-memory and persisted run summaries.
+
+### `POST /run`
+
+Request:
+
+```json
+{ "idea": "A plain-English startup idea" }
+```
+
+Response:
+
+```json
+{ "run_id": "uuid" }
+```
+
+### `GET /status/{run_id}`
+
+Returns:
+
+```json
+{
+  "run_id": "uuid",
+  "current_agent": "analyst",
+  "agent_statuses": {
+    "analyst": "running",
+    "architect": "pending",
+    "builder": "pending",
+    "pitcher": "pending"
+  },
+  "errors": [],
+  "done": false
+}
+```
+
+### `GET /output/{run_id}`
+
+Returns requirements, architecture, builder prompt, generated code files, pitch deck, errors, and run status.
+
+### Generated App Preview
+
+After Trae submits code files, SWARM.AI can prepare and run the generated app from the workspace UI.
+
+API flow:
 
 ```text
-outputs/<run_id>/validation.json
+POST /preview/{run_id}/prepare
+POST /preview/{run_id}/install
+POST /preview/{run_id}/start
+GET  /preview/{run_id}/status
+POST /preview/{run_id}/stop
 ```
 
-Quality scoring reads the generated app, requirements, architecture, pitch deck, and validation result. It writes:
+The preview launcher materializes generated source into:
 
 ```text
-outputs/<run_id>/quality.json
+generated_apps/{run_id}/
 ```
 
-The current quality target is `90`.
-
-## Output Artifacts
-
-Typical run artifacts:
+It runs the generated API on:
 
 ```text
-outputs/<run_id>/
-  requirements.json
-  architecture.json
-  generated_files.json
-  pitch_deck.json
-  summary.json
-  validation.json
-  quality.json
-  preview.json
-  generated-app/
-  generated-app.zip
+http://127.0.0.1:3001
 ```
 
-## Limitations
+It runs the generated frontend on:
 
-- Run state is stored in memory, so `/runs` and `/status/{run_id}` only include runs known to the active backend process.
-- The generated app database is local JSON, not a production database.
-- Preview ports are fixed at `3001` and `6200` unless changed in code.
-- Generated apps are intentionally template-based and domain-aware, not fully arbitrary applications.
-- Groq outputs are expected to be JSON. The helper includes parsing repair, retries, and model fallback, but deterministic fallbacks are still used when live completions fail.
-- Authentication, deployment, multi-user collaboration, and hosted persistence are outside the current scope.
+```text
+http://127.0.0.1:6200
+```
 
-## Pitch
+Use the SWARM frontend's "Generated app preview" panel for the normal demo path.
 
-SWARM.AI turns a small-business workflow problem into a runnable software demo in one pass. It combines structured agent planning with deterministic app generation, so the output is inspectable, repeatable, and easy to validate. The current system is aimed at fast local demos for businesses like bakeries, salons, clinics, fitness studios, and tuition centers: enter the workflow problem, review the generated requirements and architecture, launch the app preview, validate the code, and download the result.
+## Output Files
+
+Each run writes to `backend/outputs/{run_id}/`:
+
+- `requirements.json`
+- `architecture.json`
+- `builder_prompt.txt`
+- `code_files/`
+- `pitch_deck.json`
+- `run_summary.json`
+
+## Notes
+
+- Groq prompts are loaded from `backend/prompts/*.txt`.
+- JSON responses are stripped of markdown fences before `json.loads()`.
+- External calls are wrapped in `try/except`, and errors are stored in `state.errors`.
+- The workflow keeps moving to the next agent after an error.
+- CORS is enabled for browser-based local development.

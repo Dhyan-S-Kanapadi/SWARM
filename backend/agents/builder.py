@@ -1,1030 +1,1445 @@
-"""Internal deterministic Builder agent."""
-
-from __future__ import annotations
-
 import json
 import re
-from pathlib import Path
-from typing import Any
+from textwrap import dedent
 
 from backend.state import ProjectState
-from backend.utils import get_run_output_dir, write_code_file, write_json
+from backend.utils import complete_agent, set_agent_status, write_code_files, write_text
 
-DOMAIN_CONFIG: dict[str, dict[str, Any]] = {
-    "bakery": {
-        "businessType": "Bakery",
-        "recordLabel": "Orders",
-        "queueLabel": "Order Queue",
-        "followUpLabel": "Pickup Follow Ups",
-        "recordSlug": "orders",
-        "services": ["Custom Cake", "Bread Order", "Pastry Box", "Catering Tray"],
-    },
-    "salon": {
-        "businessType": "Salon",
-        "recordLabel": "Appointments",
-        "queueLabel": "Appointment Queue",
-        "followUpLabel": "Client Follow Ups",
-        "recordSlug": "appointments",
-        "services": ["Haircut", "Hair Color", "Facial", "Bridal Makeup"],
-    },
-    "clinic": {
-        "businessType": "Clinic",
-        "recordLabel": "Patient Visits",
-        "queueLabel": "Patient Queue",
-        "followUpLabel": "Care Follow Ups",
-        "recordSlug": "patient-visits",
-        "services": ["Consultation", "Lab Review", "Vaccination", "Follow Up Visit"],
-    },
-    "fitness studio": {
-        "businessType": "Fitness Studio",
-        "recordLabel": "Memberships",
-        "queueLabel": "Class Queue",
-        "followUpLabel": "Renewal Follow Ups",
-        "recordSlug": "memberships",
-        "services": ["Personal Training", "Yoga Class", "Strength Batch", "Nutrition Review"],
-    },
-    "tuition center": {
-        "businessType": "Tuition Center",
-        "recordLabel": "Student Enrollments",
-        "queueLabel": "Class Queue",
-        "followUpLabel": "Parent Follow Ups",
-        "recordSlug": "student-enrollments",
-        "services": ["Math Tuition", "Science Batch", "Exam Prep", "Doubt Session"],
-    },
-    "generic local business": {
-        "businessType": "Local Business",
-        "recordLabel": "Business Records",
-        "queueLabel": "Work Queue",
-        "followUpLabel": "Customer Follow Ups",
-        "recordSlug": "business-records",
-        "services": ["General Service", "Delivery", "Consultation", "Follow Up"],
-    },
-}
+
+def format_builder_prompt(state: ProjectState) -> str:
+    requirements = state.get("requirements", {})
+    architecture = state.get("architecture", {})
+    return dedent(
+        f"""
+        You are SWARM Builder, the internal code-generation agent for SWARM.AI.
+
+        Mission:
+        Build a complete local-first MVP from one plain-language idea so local business owners can create useful software in their own language.
+
+        Product requirements:
+        {json.dumps(requirements, indent=2)}
+
+        Architecture blueprint:
+        {json.dumps(architecture, indent=2)}
+
+        Build policy:
+        - Generate a runnable React + Express app.
+        - Include seed data, CRUD APIs, dashboard metrics, filters, validation, localization, and README demo flow.
+        - Do not depend on Trae or any paid builder service.
+        - The generated app must run locally with npm scripts.
+        """
+    ).strip()
+
+
+def i18n_js(product_name: str) -> str:
+    return dedent(
+        f"""
+        export const translations = {{
+          en: {{
+            appName: "{product_name}",
+            dashboard: "Dashboard",
+            records: "Records",
+            newRecord: "New record",
+            search: "Search",
+            status: "Status",
+            customer: "Customer",
+            dueDate: "Due date",
+            followUpDate: "Follow-up date",
+            amount: "Amount",
+            payment: "Payment",
+            service: "Service",
+            assignedTo: "Assigned to",
+            channel: "Channel",
+            nextAction: "Next action",
+            queue: "Daily queue",
+            followUps: "Follow-ups due",
+            pendingPayments: "Pending payments",
+            localLanguage: "Local language",
+            save: "Save",
+            reset: "Reset demo data",
+            empty: "No records match the current filters.",
+          }},
+          hi: {{
+            appName: "{product_name}",
+            dashboard: "\\u0921\\u0948\\u0936\\u092c\\u094b\\u0930\\u094d\\u0921",
+            records: "\\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921",
+            newRecord: "\\u0928\\u092f\\u093e \\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921",
+            search: "\\u0916\\u094b\\u091c\\u0947\\u0902",
+            status: "\\u0938\\u094d\\u0925\\u093f\\u0924\\u093f",
+            customer: "\\u0917\\u094d\\u0930\\u093e\\u0939\\u0915",
+            dueDate: "\\u0921\\u093f\\u0932\\u093f\\u0935\\u0930\\u0940 \\u0924\\u093e\\u0930\\u0940\\u0916",
+            followUpDate: "\\u092b\\u0949\\u0932\\u094b-\\u0905\\u092a \\u0924\\u093e\\u0930\\u0940\\u0916",
+            amount: "\\u0930\\u093e\\u0936\\u093f",
+            payment: "\\u092d\\u0941\\u0917\\u0924\\u093e\\u0928",
+            service: "\\u0938\\u0947\\u0935\\u093e",
+            assignedTo: "\\u091c\\u093f\\u092e\\u094d\\u092e\\u0947\\u0926\\u093e\\u0930",
+            channel: "\\u091a\\u0948\\u0928\\u0932",
+            nextAction: "\\u0905\\u0917\\u0932\\u093e \\u0915\\u0926\\u092e",
+            queue: "\\u0906\\u091c \\u0915\\u0940 \\u0915\\u0924\\u093e\\u0930",
+            followUps: "\\u092b\\u0949\\u0932\\u094b-\\u0905\\u092a \\u092c\\u093e\\u0915\\u0940",
+            pendingPayments: "\\u092c\\u0915\\u093e\\u092f\\u093e \\u092d\\u0941\\u0917\\u0924\\u093e\\u0928",
+            localLanguage: "\\u0938\\u094d\\u0925\\u093e\\u0928\\u0940\\u092f \\u092d\\u093e\\u0937\\u093e",
+            save: "\\u0938\\u0947\\u0935 \\u0915\\u0930\\u0947\\u0902",
+            reset: "\\u0921\\u0947\\u092e\\u094b \\u0921\\u0947\\u091f\\u093e \\u0930\\u0940\\u0938\\u0947\\u091f",
+            empty: "\\u0907\\u0928 \\u092b\\u093f\\u0932\\u094d\\u091f\\u0930 \\u0915\\u0947 \\u0932\\u093f\\u090f \\u0915\\u094b\\u0908 \\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921 \\u0928\\u0939\\u0940\\u0902 \\u092e\\u093f\\u0932\\u093e.",
+          }},
+          kn: {{
+            appName: "{product_name}",
+            dashboard: "\\u0ca1\\u0ccd\\u0caf\\u0cbe\\u0cb6\\u0ccd\\u0cac\\u0ccb\\u0cb0\\u0ccd\\u0ca1\\u0ccd",
+            records: "\\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6\\u0c97\\u0cb3\\u0cc1",
+            newRecord: "\\u0cb9\\u0cca\\u0cb8 \\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6",
+            search: "\\u0cb9\\u0cc1\\u0ca1\\u0cc1\\u0c95\\u0cbf",
+            status: "\\u0cb8\\u0ccd\\u0ca5\\u0cbf\\u0ca4\\u0cbf",
+            customer: "\\u0c97\\u0ccd\\u0cb0\\u0cbe\\u0cb9\\u0c95",
+            dueDate: "\\u0ca1\\u0cc6\\u0cb2\\u0cbf\\u0cb5\\u0cb0\\u0cbf \\u0ca6\\u0cbf\\u0ca8\\u0cbe\\u0c82\\u0c95",
+            followUpDate: "\\u0cab\\u0cbe\\u0cb2\\u0ccb-\\u0c85\\u0caa\\u0ccd \\u0ca6\\u0cbf\\u0ca8\\u0cbe\\u0c82\\u0c95",
+            amount: "\\u0cae\\u0cca\\u0ca4\\u0ccd\\u0ca4",
+            payment: "\\u0caa\\u0cbe\\u0cb5\\u0ca4\\u0cbf",
+            service: "\\u0cb8\\u0cc7\\u0cb5\\u0cc6",
+            assignedTo: "\\u0c9c\\u0cb5\\u0cbe\\u0cac\\u0ccd\\u0ca6\\u0cbe\\u0cb0\\u0cb0\\u0cc1",
+            channel: "\\u0c9a\\u0ccd\\u0caf\\u0cbe\\u0ca8\\u0cb2\\u0ccd",
+            nextAction: "\\u0cae\\u0cc1\\u0c82\\u0ca6\\u0cbf\\u0ca8 \\u0c95\\u0ccd\\u0cb0\\u0cae",
+            queue: "\\u0c87\\u0c82\\u0ca6\\u0cbf\\u0ca8 \\u0c95\\u0ca4\\u0cbe\\u0cb0\\u0cc1",
+            followUps: "\\u0cab\\u0cbe\\u0cb2\\u0ccb-\\u0c85\\u0caa\\u0ccd \\u0cac\\u0cbe\\u0c95\\u0cbf",
+            pendingPayments: "\\u0cac\\u0cbe\\u0c95\\u0cbf \\u0caa\\u0cbe\\u0cb5\\u0ca4\\u0cbf",
+            localLanguage: "\\u0cb8\\u0ccd\\u0ca5\\u0cb3\\u0cc0\\u0caf \\u0cad\\u0cbe\\u0cb7\\u0cc6",
+            save: "\\u0c89\\u0cb3\\u0cbf\\u0cb8\\u0cbf",
+            reset: "\\u0ca1\\u0cc6\\u0cae\\u0ccb \\u0ca1\\u0cc7\\u0c9f\\u0cbe \\u0cae\\u0cb0\\u0cc1\\u0cb9\\u0cca\\u0c82\\u0ca6\\u0cbf\\u0cb8\\u0cbf",
+            empty: "\\u0c88 \\u0cab\\u0cbf\\u0cb2\\u0ccd\\u0c9f\\u0cb0\\u0ccd\\u0c97\\u0cb3\\u0cbf\\u0c97\\u0cc6 \\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6\\u0c97\\u0cb3\\u0cbf\\u0cb2\\u0ccd\\u0cb2.",
+          }},
+        }};
+
+        export function formatCurrency(value, locale) {{
+          return new Intl.NumberFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN", {{
+            style: "currency",
+            currency: "INR",
+            maximumFractionDigits: 0,
+          }}).format(value || 0);
+        }}
+
+        export function formatDate(value, locale) {{
+          return new Intl.DateTimeFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN").format(new Date(value));
+        }}
+        """
+    ).strip()
 
 
 def run_builder(state: ProjectState) -> ProjectState:
-    """Generate and materialize a runnable local-business app."""
-    run_dir = Path(state.get("output_dir") or get_run_output_dir(state["run_id"]))
-    app_dir = run_dir / "generated-app"
-    file_map = generate_internal_app(
-        state["prompt"],
-        state.get("requirements", {}),
-        state.get("architecture", {}),
-    )
+    set_agent_status(state, "builder", "running")
+    state["builder_prompt"] = format_builder_prompt(state)
+    write_text(state["run_id"], "builder_prompt.txt", state["builder_prompt"])
 
-    for relative_path, content in file_map.items():
-        write_code_file(app_dir, relative_path, content)
-
-    write_json(run_dir / "generated_files.json", sorted(file_map.keys()))
-    state["output_dir"] = str(run_dir)
-    state["generated_files"] = file_map
+    state["code_files"] = generate_internal_app(state)
+    write_code_files(state["run_id"], state["code_files"])
+    complete_agent(state, "builder")
     return state
 
 
-def format_builder_prompt(
-    user_prompt: str,
-    requirements: dict[str, Any],
-    architecture: dict[str, Any],
-) -> str:
-    """Return a compact deterministic builder summary for traceability."""
-    return json.dumps(
-        {
-            "user_prompt": user_prompt,
-            "requirements": requirements,
-            "architecture": architecture,
-            "builder": "internal_deterministic",
-        },
-        indent=2,
-        sort_keys=True,
+def generate_internal_app(state: ProjectState) -> dict[str, str]:
+    requirements = state.get("requirements", {})
+    architecture = state.get("architecture", {})
+    idea = state.get("idea", "Local business operations app")
+    app_name = app_name_from_idea(idea)
+    product_name = title_from_idea(idea)
+    profile = infer_business_profile(idea, requirements)
+    features = _list_or_default(
+        requirements.get("core_features"),
+        [
+            "Customer and work item management",
+            "Due date tracking and reminders",
+            "Dashboard metrics",
+            "Search and status filters",
+            "Local language support",
+            "Demo-ready seed data",
+        ],
     )
+    features = enrich_features(features)
+    workflows = requirements.get("workflow_map") or []
+    rules = _list_or_default(requirements.get("business_rules"), ["Required customer name", "Required due date", "Status must be valid"])
+    metrics = _list_or_default(requirements.get("success_metrics"), ["Open work items", "Upcoming due dates", "Completed work", "Estimated revenue"])
+    api_routes = architecture.get("api_routes") or []
 
-
-def generate_internal_app(
-    user_prompt: str,
-    requirements: dict[str, Any],
-    architecture: dict[str, Any],
-) -> dict[str, str]:
-    """Generate the complete file map for a runnable React + Express app."""
-    context = _build_context(user_prompt, requirements, architecture)
-    seed_records = _seed_records(context)
-
-    return {
-        "package.json": _package_json(context),
-        "index.html": _index_html(context),
-        "vite.config.js": _vite_config_js(),
-        "README.md": _readme(context),
-        "server/index.js": _server_index_js(context),
-        "server/dataStore.js": _server_data_store_js(),
-        "server/app.test.js": _server_test_js(),
-        "server/seed-data.json": json.dumps(seed_records, indent=2) + "\n",
-        "src/main.jsx": _main_jsx(),
-        "src/api.js": _api_js(context),
-        "src/i18n.js": _i18n_js(context),
-        "src/App.jsx": _app_jsx(context),
-        "src/styles.css": _styles_css(),
-    }
-
-
-def _build_context(
-    user_prompt: str,
-    requirements: dict[str, Any],
-    architecture: dict[str, Any],
-) -> dict[str, Any]:
-    business_problem = requirements.get("business_problem") or user_prompt
-    domain_key = _detect_domain(user_prompt)
-    domain = DOMAIN_CONFIG[domain_key]
-    schema = architecture.get("database_schema", {})
-    schema_keys = [key for key in schema if key != "metadata"]
-    record_slug = domain["recordSlug"] or (schema_keys[0] if schema_keys else "records")
-    record_label = domain["recordLabel"]
-    metrics = _string_list(
-        requirements.get("dashboard_metrics"),
-        [f"total {record_label.lower()}", domain["queueLabel"].lower()],
-    )
-    workflows = _string_list(requirements.get("core_workflows"), ["create records", "track status"])
-    services = domain["services"] or _string_list(requirements.get("data_entities"), ["General Service", "Follow Up"])
-
-    return {
-        "app_name": f"{domain['businessType']} Manager",
-        "business_problem": business_problem,
-        "business_type": domain["businessType"],
-        "record_slug": record_slug,
-        "record_label": record_label,
-        "record_label_plural": record_label,
-        "queue_label": domain["queueLabel"],
-        "follow_up_label": domain["followUpLabel"],
-        "metrics": metrics,
+    seed_items = build_seed_items(requirements, product_name, profile)
+    payload = {
+        "appName": app_name,
+        "productName": product_name,
+        "businessType": profile["businessType"],
+        "recordLabel": profile["recordLabel"],
+        "queueLabel": profile["queueLabel"],
+        "followUpLabel": profile["followUpLabel"],
+        "idea": idea,
+        "problem": requirements.get("problem_statement", idea),
+        "audience": requirements.get("target_audience", "local business teams"),
+        "features": features,
+        "businessRules": rules,
+        "successMetrics": metrics,
         "workflows": workflows,
-        "services": [_title(service) for service in services[:5]],
-        "builder_prompt": format_builder_prompt(user_prompt, requirements, architecture),
+        "apiRoutes": api_routes,
+        "seedItems": seed_items,
+    }
+
+    return {
+        "package.json": package_json(app_name),
+        "index.html": index_html(product_name),
+        "vite.config.js": vite_config(),
+        "README.md": readme(payload),
+        "server/index.js": server_index(),
+        "server/dataStore.js": data_store(),
+        "server/seed-data.json": json.dumps(seed_items, indent=2),
+        "server/app.test.js": server_test(),
+        "src/main.jsx": main_jsx(),
+        "src/App.jsx": app_jsx(payload),
+        "src/styles.css": styles_css(),
+        "src/i18n.js": i18n_js(product_name),
+        "src/api.js": api_js(),
     }
 
 
-def _package_json(context: dict[str, Any]) -> str:
-    package = {
-        "name": _slug(context["app_name"]),
-        "version": "0.1.0",
-        "private": True,
-        "type": "module",
-        "scripts": {
-            "dev": "vite --host 127.0.0.1",
-            "server": "node server/index.js",
-            "check": "node --check server/index.js && node --check server/dataStore.js",
-            "test": "node --test server/app.test.js",
-            "build": "vite build",
-        },
-        "dependencies": {
-            "@vitejs/plugin-react": "^5.0.0",
-            "cors": "^2.8.5",
-            "express": "^4.18.3",
-            "vite": "^7.0.0",
-            "react": "^19.0.0",
-            "react-dom": "^19.0.0",
-        },
-        "devDependencies": {},
-    }
-    return json.dumps(package, indent=2) + "\n"
-
-
-def _index_html(context: dict[str, Any]) -> str:
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{context["app_name"]}</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
-"""
-
-
-def _vite_config_js() -> str:
-    return """import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    host: "127.0.0.1",
-    proxy: {
-      "/api": "http://127.0.0.1:3001"
-    }
-  }
-});
-"""
-
-
-def _readme(context: dict[str, Any]) -> str:
-    return f"""# {context["app_name"]}
-
-Generated by SWARM.AI's internal deterministic Builder agent.
-
-Business type: {context["business_type"]}
-Primary records: {context["record_label"]}
-Queue label: {context["queue_label"]}
-Follow-up label: {context["follow_up_label"]}
-
-## Problem
-
-{context["business_problem"]}
-
-## Run
-
-```bash
-npm install
-npm run server
-npm run dev
-```
-
-The Express API defaults to `http://127.0.0.1:3001`.
-
-## Checks
-
-```bash
-npm run check
-npm run test
-npm run build
-```
-"""
-
-
-def _server_index_js(context: dict[str, Any]) -> str:
-    record_slug = context["record_slug"]
-    return f"""import cors from "cors";
-import express from "express";
-import {{ pathToFileURL }} from "node:url";
-import {{ createDataStore }} from "./dataStore.js";
-
-const PORT = Number(process.env.PORT || 3001);
-const RECORD_ROUTE = "/api/{record_slug}";
-
-export function createServer(options = {{}}) {{
-  const app = express();
-  const store = createDataStore(options);
-
-  app.use(cors());
-  app.use(express.json());
-
-  app.get("/api/health", (request, response) => {{
-    response.json({{ status: "ok", service: "{context["app_name"]}" }});
-  }});
-
-  app.get("/api/metrics", async (request, response, next) => {{
-    try {{
-      response.json(await store.metrics());
-    }} catch (error) {{
-      next(error);
-    }}
-  }});
-
-  app.get(RECORD_ROUTE, async (request, response, next) => {{
-    try {{
-      response.json(await store.listRecords(request.query));
-    }} catch (error) {{
-      next(error);
-    }}
-  }});
-
-  app.post(RECORD_ROUTE, async (request, response, next) => {{
-    try {{
-      const record = await store.createRecord(request.body);
-      response.status(201).json(record);
-    }} catch (error) {{
-      next(error);
-    }}
-  }});
-
-  app.put(`${{RECORD_ROUTE}}/:id`, async (request, response, next) => {{
-    try {{
-      const record = await store.updateRecord(request.params.id, request.body);
-      if (!record) {{
-        response.status(404).json({{ error: "Record not found" }});
-        return;
-      }}
-      response.json(record);
-    }} catch (error) {{
-      next(error);
-    }}
-  }});
-
-  app.delete(`${{RECORD_ROUTE}}/:id`, async (request, response, next) => {{
-    try {{
-      const deleted = await store.deleteRecord(request.params.id);
-      if (!deleted) {{
-        response.status(404).json({{ error: "Record not found" }});
-        return;
-      }}
-      response.status(204).send();
-    }} catch (error) {{
-      next(error);
-    }}
-  }});
-
-  app.use((error, request, response, next) => {{
-    console.error(error);
-    response.status(500).json({{ error: "Internal server error" }});
-  }});
-
-  return app;
-}}
-
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {{
-  createServer().listen(PORT, "127.0.0.1", () => {{
-    console.log(`Generated app API listening on http://127.0.0.1:${{PORT}}`);
-  }});
-}}
-"""
-
-
-def _server_data_store_js() -> str:
-    return """import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import crypto from "node:crypto";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DATA_FILE = resolve(__dirname, "data", "records.json");
-const DEFAULT_SEED_FILE = resolve(__dirname, "seed-data.json");
-
-export function createDataStore(options = {}) {
-  const dataFile = options.dataFile || DEFAULT_DATA_FILE;
-  const seedFile = options.seedFile || DEFAULT_SEED_FILE;
-
-  async function ensureData() {
-    await mkdir(dirname(dataFile), { recursive: true });
-    try {
-      await readFile(dataFile, "utf-8");
-    } catch {
-      const seed = JSON.parse(await readFile(seedFile, "utf-8"));
-      await writeFile(dataFile, JSON.stringify(seed, null, 2) + "\\n", "utf-8");
-    }
-  }
-
-  async function readRecords() {
-    await ensureData();
-    return JSON.parse(await readFile(dataFile, "utf-8"));
-  }
-
-  async function writeRecords(records) {
-    await mkdir(dirname(dataFile), { recursive: true });
-    await writeFile(dataFile, JSON.stringify(records, null, 2) + "\\n", "utf-8");
-  }
-
-  return {
-    async listRecords(filters = {}) {
-      const records = await readRecords();
-      const search = String(filters.search || "").trim().toLowerCase();
-      const status = String(filters.status || "").trim().toLowerCase();
-      return records.filter((record) => {
-        const matchesSearch = !search || [record.name, record.service, record.notes]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(search));
-        const matchesStatus = !status || String(record.status).toLowerCase() === status;
-        return matchesSearch && matchesStatus;
-      });
-    },
-
-    async createRecord(input) {
-      const records = await readRecords();
-      const now = new Date().toISOString();
-      const record = {
-        id: crypto.randomUUID(),
-        name: String(input.name || "New record"),
-        service: String(input.service || "General"),
-        status: String(input.status || "open"),
-        notes: String(input.notes || ""),
-        createdAt: now,
-        updatedAt: now
-      };
-      records.unshift(record);
-      await writeRecords(records);
-      return record;
-    },
-
-    async updateRecord(id, updates) {
-      const records = await readRecords();
-      const index = records.findIndex((record) => record.id === id);
-      if (index === -1) {
-        return null;
-      }
-      records[index] = {
-        ...records[index],
-        ...updates,
-        id,
-        updatedAt: new Date().toISOString()
-      };
-      await writeRecords(records);
-      return records[index];
-    },
-
-    async deleteRecord(id) {
-      const records = await readRecords();
-      const nextRecords = records.filter((record) => record.id !== id);
-      if (nextRecords.length === records.length) {
-        return false;
-      }
-      await writeRecords(nextRecords);
-      return true;
-    },
-
-    async metrics() {
-      const records = await readRecords();
-      const open = records.filter((record) => record.status === "open").length;
-      const inProgress = records.filter((record) => record.status === "in-progress").length;
-      const completed = records.filter((record) => record.status === "completed").length;
-      const followUps = records.filter((record) => record.status === "follow-up").length;
-      return {
-        total: records.length,
-        open,
-        inProgress,
-        completed,
-        followUps
-      };
-    }
-  };
-}
-"""
-
-
-def _server_test_js() -> str:
-    return """import test from "node:test";
-import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { createDataStore } from "./dataStore.js";
-
-test("data store supports CRUD, search, filters, and metrics", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "swarm-generated-"));
-  const dataFile = join(dir, "records.json");
-  const seedFile = join(dir, "seed-data.json");
-  await writeFile(seedFile, JSON.stringify([
-    { id: "seed-1", name: "Asha", service: "Consultation", status: "open", notes: "first", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }
-  ]), "utf-8");
-
-  try {
-    const store = createDataStore({ dataFile, seedFile });
-    assert.equal((await store.listRecords()).length, 1);
-
-    const created = await store.createRecord({ name: "Ravi", service: "Delivery", status: "in-progress", notes: "priority" });
-    assert.equal(created.name, "Ravi");
-    assert.equal((await store.listRecords({ search: "priority" })).length, 1);
-    assert.equal((await store.listRecords({ status: "in-progress" })).length, 1);
-
-    const updated = await store.updateRecord(created.id, { status: "completed" });
-    assert.equal(updated.status, "completed");
-
-    const metrics = await store.metrics();
-    assert.equal(metrics.total, 2);
-    assert.equal(metrics.completed, 1);
-
-    assert.equal(await store.deleteRecord(created.id), true);
-    assert.equal(await store.deleteRecord("missing"), false);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-"""
-
-
-def _main_jsx() -> str:
-    return """import React from "react";
-import { createRoot } from "react-dom/client";
-import App from "./App.jsx";
-import "./styles.css";
-
-createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
-"""
-
-
-def _api_js(context: dict[str, Any]) -> str:
-    record_route = f"/api/{context['record_slug']}"
-    template = """const API_BASE = import.meta.env.VITE_API_BASE || "";
-const RECORD_ROUTE = "__RECORD_ROUTE__";
-
-export async function fetchMetrics() {
-  return request("/api/metrics");
-}
-
-export async function fetchRecords(filters = {}) {
-  const params = new URLSearchParams();
-  if (filters.search) params.set("search", filters.search);
-  if (filters.status) params.set("status", filters.status);
-  const query = params.toString();
-  return request(`${RECORD_ROUTE}${query ? `?${query}` : ""}`);
-}
-
-export async function createRecord(record) {
-  return request(RECORD_ROUTE, {
-    method: "POST",
-    body: JSON.stringify(record)
-  });
-}
-
-export async function updateRecord(id, updates) {
-  return request(`${RECORD_ROUTE}/${id}`, {
-    method: "PUT",
-    body: JSON.stringify(updates)
-  });
-}
-
-export async function deleteRecord(id) {
-  await request(`${RECORD_ROUTE}/${id}`, { method: "DELETE" });
-}
-
-async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options
-  });
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-  if (response.status === 204) {
-    return null;
-  }
-  return response.json();
-}
-"""
-    return template.replace("__RECORD_ROUTE__", record_route)
-
-
-def _i18n_js(context: dict[str, Any]) -> str:
-    labels = {
-        "appName": context["app_name"],
-        "businessType": context["business_type"],
-        "recordLabel": context["record_label"],
-        "queueLabel": context["queue_label"],
-        "followUpLabel": context["follow_up_label"],
-        "dashboard": "Dashboard",
-        "records": "Records",
-        "search": "Search",
-        "status": "Status",
-        "service": "Service",
-        "notes": "Notes",
-    }
-    return f"export const labels = {json.dumps(labels, indent=2)};\n"
-
-
-def _app_jsx(context: dict[str, Any]) -> str:
-    services = json.dumps(context["services"])
-    business_problem = _jsx_text(context["business_problem"])
-    domain_markers = json.dumps(
+def app_name_from_idea(idea: str) -> str:
+    words = re.findall(r"[a-zA-Z0-9]+", idea.lower())
+    stop_words = {"a", "an", "ai", "app", "for", "that", "the", "to", "with"}
+    useful = [word for word in words if word not in stop_words][:3]
+    return "-".join(useful or ["swarm-generated-app"])
+
+
+def title_from_idea(idea: str) -> str:
+    words = re.findall(r"[a-zA-Z0-9]+", idea)
+    stop_words = {"A", "An", "AI", "app", "for", "that", "the", "to", "with"}
+    useful = [word for word in words if word not in stop_words][:3]
+    return " ".join(useful or ["SWARM LocalOps"])
+
+
+def enrich_features(features: list[str]) -> list[str]:
+    required = [
+        "customer records with follow-up history",
+        "deadline, reminder, and overdue tracking",
+        "daily operations queue for staff",
+        "payment status and revenue dashboard",
+        "English, Hindi, and Kannada local-language UX",
+        "local-first JSON storage with tests and build validation",
+    ]
+    combined = list(features)
+    for feature in required:
+        if not any(feature.lower() in str(existing).lower() for existing in combined):
+            combined.append(feature)
+    return combined[:12]
+
+
+def infer_business_profile(idea: str, requirements: dict) -> dict:
+    idea_source = idea.lower()
+    context_source = f"{idea} {json.dumps(requirements, ensure_ascii=True)}".lower()
+    profiles = [
         {
-            "businessType": context["business_type"],
-            "recordLabel": context["record_label"],
-            "queueLabel": context["queue_label"],
-            "followUpLabel": context["follow_up_label"],
+            "keywords": ["bakery", "cake", "cakes", "baker"],
+            "businessType": "bakery",
+            "recordLabel": "cake order",
+            "queueLabel": "production queue",
+            "followUpLabel": "customer follow-up",
+            "services": ["Custom birthday cake", "Wedding cake tasting", "Cupcake bulk order", "Photo cake delivery"],
         },
-        indent=2,
-    )
-    return f"""import {{ useEffect, useMemo, useState }} from "react";
-import {{ createRecord, deleteRecord, fetchMetrics, fetchRecords, updateRecord }} from "./api.js";
-import {{ labels }} from "./i18n.js";
+        {
+            "keywords": ["salon", "saloon", "beauty", "spa", "hair", "makeup", "barber"],
+            "businessType": "salon",
+            "recordLabel": "appointment",
+            "queueLabel": "appointment queue",
+            "followUpLabel": "client follow-up",
+            "services": ["Hair styling appointment", "Bridal makeup booking", "Facial package", "Color touch-up"],
+        },
+        {
+            "keywords": ["clinic", "doctor", "patient", "dental", "health"],
+            "businessType": "clinic",
+            "recordLabel": "patient visit",
+            "queueLabel": "visit queue",
+            "followUpLabel": "patient follow-up",
+            "services": ["Consultation", "Lab report review", "Dental cleaning", "Follow-up visit"],
+        },
+        {
+            "keywords": ["fitness", "gym", "studio", "class"],
+            "businessType": "fitness studio",
+            "recordLabel": "member booking",
+            "queueLabel": "class queue",
+            "followUpLabel": "member follow-up",
+            "services": ["Yoga class booking", "Personal training session", "Membership renewal", "Trial class"],
+        },
+        {
+            "keywords": ["tuition", "school", "student", "coaching"],
+            "businessType": "tuition center",
+            "recordLabel": "student task",
+            "queueLabel": "class queue",
+            "followUpLabel": "parent follow-up",
+            "services": ["Math batch enrolment", "Exam doubt session", "Fee reminder", "Parent meeting"],
+        },
+    ]
 
-const SERVICES = {services};
-const STATUSES = ["open", "in-progress", "completed", "follow-up"];
-const DOMAIN_MARKERS = {domain_markers};
+    # Trust the user's original prompt first. LLM-generated requirements can be
+    # verbose or occasionally drift, but the user's prompt is the source of truth.
+    prompt_profile = _match_business_profile(idea_source, profiles)
+    if prompt_profile:
+        return prompt_profile
 
-const emptyForm = {{
-  name: "",
-  service: SERVICES[0] || "General",
-  status: "open",
-  notes: ""
-}};
+    context_profile = _match_business_profile(context_source, profiles)
+    if context_profile:
+        return context_profile
 
-export default function App() {{
-  const [records, setRecords] = useState([]);
-  const [metrics, setMetrics] = useState(null);
-  const [form, setForm] = useState(emptyForm);
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  async function load() {{
-    setLoading(true);
-    setError("");
-    try {{
-      const [nextRecords, nextMetrics] = await Promise.all([
-        fetchRecords({{ search, status }}),
-        fetchMetrics()
-      ]);
-      setRecords(nextRecords);
-      setMetrics(nextMetrics);
-    }} catch (loadError) {{
-      setError(loadError.message);
-    }} finally {{
-      setLoading(false);
-    }}
-  }}
-
-  useEffect(() => {{
-    load();
-  }}, [search, status]);
-
-  const visibleMetrics = useMemo(() => [
-    ["Total", metrics?.total ?? 0],
-    ["Open", metrics?.open ?? 0],
-    ["In Progress", metrics?.inProgress ?? 0],
-    ["Completed", metrics?.completed ?? 0],
-    ["Follow Ups", metrics?.followUps ?? 0]
-  ], [metrics]);
-
-  async function handleSubmit(event) {{
-    event.preventDefault();
-    await createRecord(form);
-    setForm(emptyForm);
-    await load();
-  }}
-
-  async function advanceStatus(record) {{
-    const index = STATUSES.indexOf(record.status);
-    const nextStatus = STATUSES[(index + 1) % STATUSES.length];
-    await updateRecord(record.id, {{ status: nextStatus }});
-    await load();
-  }}
-
-  return (
-    <main className="app-shell">
-      <section className="hero">
-        <div>
-          <p className="eyebrow">{{DOMAIN_MARKERS.businessType}} workflow app</p>
-          <h1>{{labels.appName}}</h1>
-          <p>{business_problem}</p>
-        </div>
-      </section>
-
-      <section className="metrics-grid">
-        {{visibleMetrics.map(([label, value]) => (
-          <article className="metric" key={{label}}>
-            <span>{{label}}</span>
-            <strong>{{value}}</strong>
-          </article>
-        ))}}
-      </section>
-
-      <section className="workspace">
-        <form className="panel form-panel" onSubmit={{handleSubmit}}>
-          <h2>New {{labels.recordLabel}}</h2>
-          <label>
-            Name
-            <input value={{form.name}} onChange={{(event) => setForm({{ ...form, name: event.target.value }})}} required />
-          </label>
-          <label>
-            {{labels.service}}
-            <select value={{form.service}} onChange={{(event) => setForm({{ ...form, service: event.target.value }})}}>
-              {{SERVICES.map((service) => <option key={{service}}>{{service}}</option>)}}
-            </select>
-          </label>
-          <label>
-            {{labels.status}}
-            <select value={{form.status}} onChange={{(event) => setForm({{ ...form, status: event.target.value }})}}>
-              {{STATUSES.map((item) => <option key={{item}} value={{item}}>{{item}}</option>)}}
-            </select>
-          </label>
-          <label>
-            {{labels.notes}}
-            <textarea value={{form.notes}} onChange={{(event) => setForm({{ ...form, notes: event.target.value }})}} />
-          </label>
-          <button type="submit">Add {{labels.recordLabel}}</button>
-        </form>
-
-        <section className="panel list-panel">
-          <div className="list-header">
-            <div>
-              <h2>{{DOMAIN_MARKERS.queueLabel}}</h2>
-              <p className="section-note">{{DOMAIN_MARKERS.followUpLabel}}</p>
-            </div>
-            <div className="filters">
-              <input placeholder={{labels.search}} value={{search}} onChange={{(event) => setSearch(event.target.value)}} />
-              <select value={{status}} onChange={{(event) => setStatus(event.target.value)}}>
-                <option value="">All statuses</option>
-                {{STATUSES.map((item) => <option key={{item}} value={{item}}>{{item}}</option>)}}
-              </select>
-            </div>
-          </div>
-
-          {{error && <p className="error">{{error}}</p>}}
-          {{loading ? (
-            <p className="muted">Loading records...</p>
-          ) : records.length === 0 ? (
-            <p className="muted">No records match the current filters.</p>
-          ) : (
-            <div className="records">
-              {{records.map((record) => (
-                <article className="record" key={{record.id}}>
-                  <div>
-                    <h3>{{record.name}}</h3>
-                    <p>{{record.service}} · {{record.notes || "No notes"}}</p>
-                  </div>
-                  <span className={{`status ${{record.status}}`}}>{{record.status}}</span>
-                  <div className="record-actions">
-                    <button type="button" onClick={{() => advanceStatus(record)}}>Next status</button>
-                    <button type="button" className="danger" onClick={{async () => {{ await deleteRecord(record.id); await load(); }}}}>Delete</button>
-                  </div>
-                </article>
-              ))}}
-            </div>
-          )}}
-        </section>
-      </section>
-    </main>
-  );
-}}
-"""
+    return fallback_business_profile()
 
 
-def _styles_css() -> str:
-    return """:root {
-  color: #1f2933;
-  background: #f6f8fb;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
+def _match_business_profile(source: str, profiles: list[dict]) -> dict | None:
+    for profile in profiles:
+        if any(keyword in source for keyword in profile["keywords"]):
+            return profile
 
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
-button {
-  border: 0;
-  border-radius: 8px;
-  background: #1565c0;
-  color: white;
-  cursor: pointer;
-  padding: 0.7rem 0.9rem;
-}
-
-button.danger {
-  background: #b42318;
-}
-
-.app-shell {
-  margin: 0 auto;
-  max-width: 1180px;
-  padding: 24px;
-}
-
-.hero {
-  align-items: center;
-  background: linear-gradient(135deg, #0f5f8f, #18836f);
-  border-radius: 8px;
-  color: white;
-  display: flex;
-  min-height: 210px;
-  padding: 32px;
-}
-
-.hero h1 {
-  font-size: clamp(2rem, 4vw, 3.7rem);
-  line-height: 1;
-  margin: 0 0 12px;
-}
-
-.hero p {
-  max-width: 760px;
-}
-
-.eyebrow {
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.metrics-grid {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  margin: 22px 0;
-}
-
-.metric,
-.panel {
-  background: white;
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-}
-
-.metric {
-  padding: 18px;
-}
-
-.metric span {
-  color: #52606d;
-  display: block;
-}
-
-.metric strong {
-  display: block;
-  font-size: 2rem;
-  margin-top: 6px;
-}
-
-.workspace {
-  display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(280px, 360px) 1fr;
-}
-
-.panel {
-  padding: 20px;
-}
-
-.form-panel {
-  align-self: start;
-}
-
-.form-panel label {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 14px;
-}
-
-input,
-select,
-textarea {
-  border: 1px solid #bcccdc;
-  border-radius: 8px;
-  padding: 0.65rem;
-  width: 100%;
-}
-
-textarea {
-  min-height: 96px;
-  resize: vertical;
-}
-
-.list-header {
-  align-items: center;
-  display: flex;
-  gap: 16px;
-  justify-content: space-between;
-}
-
-.filters {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(170px, 1fr) minmax(130px, 160px);
-}
-
-.records {
-  display: grid;
-  gap: 12px;
-}
-
-.record {
-  align-items: center;
-  border: 1px solid #e4e7eb;
-  border-radius: 8px;
-  display: grid;
-  gap: 14px;
-  grid-template-columns: 1fr auto auto;
-  padding: 14px;
-}
-
-.record h3,
-.record p {
-  margin: 0;
-}
-
-.section-note {
-  color: #697586;
-  margin: 0;
-}
-
-.status {
-  background: #e0f2fe;
-  border-radius: 999px;
-  color: #075985;
-  padding: 0.35rem 0.7rem;
-}
-
-.status.completed {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.status.follow-up {
-  background: #fef3c7;
-  color: #92400e;
-}
-
-.record-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.muted {
-  color: #697586;
-}
-
-.error {
-  color: #b42318;
-}
-
-@media (max-width: 780px) {
-  .app-shell {
-    padding: 16px;
-  }
-
-  .workspace,
-  .record,
-  .list-header,
-  .filters {
-    grid-template-columns: 1fr;
-  }
-
-  .list-header {
-    align-items: stretch;
-    display: grid;
-  }
-}
-"""
+    return None
 
 
-def _seed_records(context: dict[str, Any]) -> list[dict[str, str]]:
-    services = context["services"] or ["General"]
-    names = ["Asha", "Ravi", "Meera", "Kabir"]
-    statuses = ["open", "in-progress", "completed", "follow-up"]
+def fallback_business_profile() -> dict:
+    return {
+        "businessType": "local business",
+        "recordLabel": "customer work item",
+        "queueLabel": "operations queue",
+        "followUpLabel": "customer follow-up",
+        "services": ["New customer request", "Confirmed booking", "In-progress work", "Completed delivery"],
+    }
+
+
+def build_seed_items(requirements: dict, product_name: str, profile: dict) -> list[dict]:
+    raw_seed = requirements.get("seed_data")
+    if isinstance(raw_seed, list) and raw_seed:
+        items = []
+        for index, item in enumerate(raw_seed[:6], start=1):
+            text = item if isinstance(item, str) else json.dumps(item)
+            items.append(seed_item(index, text, product_name, profile))
+        return items
+
     return [
-        {
-            "id": f"seed-{index + 1}",
-            "name": f"{name} {context['record_label']}",
-            "service": services[index % len(services)],
-            "status": statuses[index % len(statuses)],
-            "notes": (
-                f"{context['business_type']} seed data for {context['queue_label']} "
-                f"and {context['follow_up_label']}"
-            ),
-            "createdAt": f"2026-01-0{index + 1}T09:00:00.000Z",
-            "updatedAt": f"2026-01-0{index + 1}T09:00:00.000Z",
-        }
-        for index, name in enumerate(names)
+        seed_item(1, f"New {profile['recordLabel']} due next week", product_name, profile, "new", 2400),
+        seed_item(2, f"Confirmed {profile['recordLabel']} with reminder tomorrow", product_name, profile, "confirmed", 5200),
+        seed_item(3, f"In-progress {profile['recordLabel']} requiring follow-up", product_name, profile, "in_progress", 3100),
+        seed_item(4, f"Completed {profile['recordLabel']} awaiting feedback", product_name, profile, "completed", 1800),
     ]
 
 
-def _string_list(value: Any, fallback: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        return fallback
-    cleaned = [str(item).strip() for item in value if str(item).strip()]
-    return cleaned or fallback
+def seed_item(index: int, source: str, product_name: str, profile: dict, status: str | None = None, amount: int | None = None) -> dict:
+    statuses = ["new", "confirmed", "in_progress", "completed"]
+    due_day = 12 + index
+    follow_day = max(12, due_day - 1)
+    service = profile["services"][(index - 1) % len(profile["services"])]
+    return {
+        "id": index,
+        "customerName": ["Asha Rao", "Kiran Stores", "Meera Kumar", "Local Club"][index % 4],
+        "phone": f"+91 98{index}00 12{index}45",
+        "title": source[:72],
+        "category": product_name,
+        "serviceType": service,
+        "status": status or statuses[index % len(statuses)],
+        "priority": ["low", "medium", "high"][index % 3],
+        "dueDate": f"2026-06-{due_day:02d}",
+        "followUpDate": f"2026-06-{follow_day:02d}",
+        "paymentStatus": ["pending", "partial", "paid"][index % 3],
+        "assignedTo": ["Owner", "Front desk", "Senior staff", "Delivery staff"][index % 4],
+        "channel": ["WhatsApp", "Phone", "Walk-in", "Instagram"][index % 4],
+        "progress": min(100, index * 22),
+        "amount": amount or (1500 + index * 850),
+        "nextAction": f"{profile['followUpLabel'].title()} before due date",
+        "notes": f"Local {profile['businessType']} demo record generated from: {source[:120]}",
+        "language": "en",
+    }
 
 
-def _detect_domain(prompt: str) -> str:
-    normalized = prompt.lower()
-    if any(term in normalized for term in ("salon", "saloon", "beauty", "spa", "hair", "makeup", "barber")):
-        return "salon"
-    if any(term in normalized for term in ("bakery", "baker", "cake", "bread", "pastry")):
-        return "bakery"
-    if any(term in normalized for term in ("clinic", "doctor", "patient", "medical", "dentist", "therapy")):
-        return "clinic"
-    if any(term in normalized for term in ("fitness", "gym", "trainer", "yoga", "workout")):
-        return "fitness studio"
-    if any(term in normalized for term in ("tuition", "coaching", "student", "class", "teacher", "academy")):
-        return "tuition center"
-    return "generic local business"
+def _list_or_default(value, fallback: list[str]) -> list[str]:
+    return value if isinstance(value, list) and value else fallback
 
 
-def _title(value: str) -> str:
-    return " ".join(word.capitalize() for word in re.split(r"[\s_-]+", value) if word)
-
-
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug or "swarm-generated-app"
-
-
-def _jsx_text(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("{", "&#123;")
-        .replace("}", "&#125;")
+def package_json(app_name: str) -> str:
+    return json.dumps(
+        {
+            "name": app_name,
+            "version": "1.0.0",
+            "private": True,
+            "type": "module",
+            "scripts": {
+                "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+                "dev:server": "node server/index.js",
+                "dev:client": "vite --host 127.0.0.1",
+                "check": "node --check server/index.js && node --check server/dataStore.js",
+                "test": "node --test server/app.test.js",
+                "build": "vite build",
+                "start": "node server/index.js",
+            },
+            "dependencies": {
+                "@vitejs/plugin-react": "^5.0.0",
+                "concurrently": "^9.1.2",
+                "cors": "^2.8.5",
+                "express": "^4.19.2",
+                "vite": "^7.0.0",
+                "react": "^19.0.0",
+                "react-dom": "^19.0.0",
+            },
+            "devDependencies": {},
+        },
+        indent=2,
     )
 
 
-def _app_name(problem: str) -> str:
-    words = re.findall(r"[A-Za-z0-9]+", problem)[:4]
-    if not words:
-        return "SWARM Generated App"
-    return f"{_title(' '.join(words))} Manager"
+def index_html(product_name: str) -> str:
+    return dedent(
+        f"""
+        <!doctype html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>{product_name}</title>
+          </head>
+          <body>
+            <div id="root"></div>
+            <script type="module" src="/src/main.jsx"></script>
+          </body>
+        </html>
+        """
+    ).strip()
+
+
+def vite_config() -> str:
+    return dedent(
+        """
+        import { defineConfig } from "vite";
+        import react from "@vitejs/plugin-react";
+
+        export default defineConfig({
+          plugins: [react()],
+          server: {
+            proxy: {
+              "/api": "http://127.0.0.1:3001"
+            }
+          }
+        });
+        """
+    ).strip()
+
+
+def server_index() -> str:
+    return dedent(
+        """
+        import express from "express";
+        import cors from "cors";
+        import { createItem, deleteItem, getItems, getMetrics, resetData, updateItem } from "./dataStore.js";
+
+        const app = express();
+        const port = Number(process.env.PORT || 3001);
+
+        app.use(cors());
+        app.use(express.json({ limit: "1mb" }));
+
+        app.get("/api/health", (_req, res) => {
+          res.json({ ok: true, service: "SWARM generated app" });
+        });
+
+        app.get("/api/items", (req, res) => {
+          res.json(getItems(req.query));
+        });
+
+        app.post("/api/items", (req, res) => {
+          try {
+            res.status(201).json(createItem(req.body));
+          } catch (error) {
+            res.status(400).json({ error: error.message });
+          }
+        });
+
+        app.put("/api/items/:id", (req, res) => {
+          try {
+            res.json(updateItem(Number(req.params.id), req.body));
+          } catch (error) {
+            res.status(404).json({ error: error.message });
+          }
+        });
+
+        app.delete("/api/items/:id", (req, res) => {
+          deleteItem(Number(req.params.id));
+          res.status(204).end();
+        });
+
+        app.get("/api/metrics", (_req, res) => {
+          res.json(getMetrics());
+        });
+
+        app.post("/api/reset", (_req, res) => {
+          resetData();
+          res.json({ ok: true });
+        });
+
+        app.listen(port, () => {
+          console.log(`Generated app API running on http://127.0.0.1:${port}`);
+        });
+        """
+    ).strip()
+
+
+def data_store() -> str:
+    return dedent(
+        """
+        import fs from "fs";
+        import path from "path";
+        import { fileURLToPath } from "url";
+
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const seedPath = path.join(__dirname, "seed-data.json");
+        const dbPath = path.join(__dirname, "local-db.json");
+        const statuses = ["new", "confirmed", "in_progress", "completed"];
+
+        function readJson(filePath) {
+          return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        }
+
+        function ensureDb() {
+          if (!fs.existsSync(dbPath)) {
+            fs.writeFileSync(dbPath, JSON.stringify(readJson(seedPath), null, 2));
+          }
+        }
+
+        function writeItems(items) {
+          fs.writeFileSync(dbPath, JSON.stringify(items, null, 2));
+        }
+
+        export function resetData() {
+          writeItems(readJson(seedPath));
+        }
+
+        export function allItems() {
+          ensureDb();
+          return readJson(dbPath);
+        }
+
+        export function getItems(query = {}) {
+          let items = allItems();
+          if (query.status && query.status !== "all") {
+            items = items.filter((item) => item.status === query.status);
+          }
+          if (query.search) {
+            const term = String(query.search).toLowerCase();
+            items = items.filter((item) =>
+              `${item.customerName} ${item.title} ${item.category} ${item.serviceType} ${item.paymentStatus} ${item.assignedTo} ${item.nextAction}`
+                .toLowerCase()
+                .includes(term)
+            );
+          }
+          return items.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+        }
+
+        export function createItem(payload) {
+          const items = allItems();
+          const item = normalizeItem({ ...payload, id: nextId(items) });
+          items.push(item);
+          writeItems(items);
+          return item;
+        }
+
+        export function updateItem(id, payload) {
+          const items = allItems();
+          const index = items.findIndex((item) => item.id === id);
+          if (index === -1) throw new Error("Record not found");
+          items[index] = normalizeItem({ ...items[index], ...payload, id });
+          writeItems(items);
+          return items[index];
+        }
+
+        export function deleteItem(id) {
+          writeItems(allItems().filter((item) => item.id !== id));
+        }
+
+        export function getMetrics() {
+          const items = allItems();
+          const today = "2026-06-11";
+          const activeItems = items.filter((item) => item.status !== "completed");
+          return {
+            total: items.length,
+            open: activeItems.length,
+            completed: items.filter((item) => item.status === "completed").length,
+            upcoming: activeItems.filter((item) => item.dueDate >= today).length,
+            dueToday: activeItems.filter((item) => item.dueDate === today).length,
+            overdue: activeItems.filter((item) => item.dueDate < today).length,
+            highPriority: activeItems.filter((item) => item.priority === "high").length,
+            followUpsDue: activeItems.filter((item) => item.followUpDate <= today).length,
+            pendingPayments: items.filter((item) => item.paymentStatus !== "paid").length,
+            revenue: items.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+            pendingRevenue: items
+              .filter((item) => item.paymentStatus !== "paid")
+              .reduce((sum, item) => sum + Number(item.amount || 0), 0),
+            productionQueue: activeItems
+              .slice()
+              .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))
+              .slice(0, 5),
+            byStatus: statuses.map((status) => ({ status, count: items.filter((item) => item.status === status).length })),
+          };
+        }
+
+        function normalizeItem(payload) {
+          if (!payload.customerName) throw new Error("Customer name is required");
+          if (!payload.title) throw new Error("Title is required");
+          if (!payload.dueDate) throw new Error("Due date is required");
+          if (!statuses.includes(payload.status)) throw new Error("Invalid status");
+          return {
+            id: Number(payload.id),
+            customerName: String(payload.customerName),
+            phone: String(payload.phone || ""),
+            title: String(payload.title),
+            category: String(payload.category || "General"),
+            serviceType: String(payload.serviceType || payload.category || "General"),
+            status: String(payload.status),
+            priority: String(payload.priority || "medium"),
+            dueDate: String(payload.dueDate),
+            followUpDate: String(payload.followUpDate || payload.dueDate),
+            paymentStatus: String(payload.paymentStatus || "pending"),
+            assignedTo: String(payload.assignedTo || "Owner"),
+            channel: String(payload.channel || "Walk-in"),
+            progress: Number(payload.progress || 0),
+            amount: Number(payload.amount || 0),
+            nextAction: String(payload.nextAction || "Follow up with customer"),
+            notes: String(payload.notes || ""),
+            language: String(payload.language || "en"),
+          };
+        }
+
+        function nextId(items) {
+          return items.reduce((max, item) => Math.max(max, Number(item.id)), 0) + 1;
+        }
+        """
+    ).strip()
+
+
+def server_test() -> str:
+    return dedent(
+        """
+        import test from "node:test";
+        import assert from "node:assert/strict";
+        import { createItem, getItems, getMetrics, resetData, updateItem } from "./dataStore.js";
+
+        test("data workflow supports create, update, filter, and metrics", () => {
+          resetData();
+          const created = createItem({
+            customerName: "Test Customer",
+            title: "Test work item",
+            dueDate: "2026-06-25",
+            followUpDate: "2026-06-20",
+            status: "new",
+            paymentStatus: "partial",
+            amount: 999
+          });
+          assert.equal(created.customerName, "Test Customer");
+          const updated = updateItem(created.id, { status: "completed" });
+          assert.equal(updated.status, "completed");
+          assert.ok(getItems({ search: "test" }).length >= 1);
+          assert.ok(getMetrics().total >= 1);
+          assert.ok(Array.isArray(getMetrics().productionQueue));
+          assert.ok("pendingPayments" in getMetrics());
+        });
+        """
+    ).strip()
+
+
+def main_jsx() -> str:
+    return dedent(
+        """
+        import React from "react";
+        import { createRoot } from "react-dom/client";
+        import App from "./App.jsx";
+        import "./styles.css";
+
+        createRoot(document.getElementById("root")).render(<App />);
+        """
+    ).strip()
+
+
+def api_js() -> str:
+    return dedent(
+        """
+        const headers = { "Content-Type": "application/json" };
+
+        async function request(path, options = {}) {
+          const response = await fetch(path, { headers, ...options });
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error || `Request failed: ${response.status}`);
+          }
+          if (response.status === 204) return null;
+          return response.json();
+        }
+
+        export const api = {
+          items: (params = {}) => request(`/api/items?${new URLSearchParams(params)}`),
+          metrics: () => request("/api/metrics"),
+          create: (payload) => request("/api/items", { method: "POST", body: JSON.stringify(payload) }),
+          update: (id, payload) => request(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+          remove: (id) => request(`/api/items/${id}`, { method: "DELETE" }),
+          reset: () => request("/api/reset", { method: "POST" }),
+        };
+        """
+    ).strip()
+
+
+def i18n_js(product_name: str) -> str:
+    return dedent(
+        f"""
+        export const translations = {{
+          en: {{
+            appName: "{product_name}",
+            dashboard: "Dashboard",
+            records: "Records",
+            newRecord: "New record",
+            search: "Search",
+            status: "Status",
+            customer: "Customer",
+            dueDate: "Due date",
+            amount: "Amount",
+            save: "Save",
+            reset: "Reset demo data",
+            empty: "No records match the current filters.",
+          }},
+          hi: {{
+            appName: "{product_name}",
+            dashboard: "डैशबोर्ड",
+            records: "रिकॉर्ड",
+            newRecord: "नया रिकॉर्ड",
+            search: "खोजें",
+            status: "स्थिति",
+            customer: "ग्राहक",
+            dueDate: "तारीख",
+            amount: "राशि",
+            save: "सेव करें",
+            reset: "डेमो डेटा रीसेट",
+            empty: "इन फिल्टर के लिए कोई रिकॉर्ड नहीं मिला.",
+          }},
+          kn: {{
+            appName: "{product_name}",
+            dashboard: "ಡ್ಯಾಶ್ಬೋರ್ಡ್",
+            records: "ದಾಖಲೆಗಳು",
+            newRecord: "ಹೊಸ ದಾಖಲೆ",
+            search: "ಹುಡುಕಿ",
+            status: "ಸ್ಥಿತಿ",
+            customer: "ಗ್ರಾಹಕ",
+            dueDate: "ದಿನಾಂಕ",
+            amount: "ಮೊತ್ತ",
+            save: "ಉಳಿಸಿ",
+            reset: "ಡೆಮೊ ಡೇಟಾ ಮರುಹೊಂದಿಸಿ",
+            empty: "ಈ ಫಿಲ್ಟರ್‌ಗಳಿಗೆ ದಾಖಲೆಗಳಿಲ್ಲ.",
+          }},
+        }};
+
+        export function formatCurrency(value, locale) {{
+          return new Intl.NumberFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN", {{
+            style: "currency",
+            currency: "INR",
+            maximumFractionDigits: 0,
+          }}).format(value || 0);
+        }}
+
+        export function formatDate(value, locale) {{
+          return new Intl.DateTimeFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN").format(new Date(value));
+        }}
+        """
+    ).strip()
+
+
+def app_jsx(payload: dict) -> str:
+    config = json.dumps(payload, indent=2)
+    return dedent(
+        f"""
+        import {{ useEffect, useMemo, useState }} from "react";
+        import {{ api }} from "./api.js";
+        import {{ formatCurrency, formatDate, translations }} from "./i18n.js";
+
+        const config = {config};
+        const emptyForm = {{
+          customerName: "",
+          phone: "",
+          title: "",
+          category: config.productName,
+          status: "new",
+          priority: "medium",
+          dueDate: "2026-06-20",
+          amount: 0,
+          notes: "",
+          language: "en",
+        }};
+
+        export default function App() {{
+          const [items, setItems] = useState([]);
+          const [metrics, setMetrics] = useState(null);
+          const [form, setForm] = useState(emptyForm);
+          const [editingId, setEditingId] = useState(null);
+          const [search, setSearch] = useState("");
+          const [status, setStatus] = useState("all");
+          const [locale, setLocale] = useState("en");
+          const [loading, setLoading] = useState(true);
+          const [error, setError] = useState("");
+          const t = translations[locale];
+
+          async function load() {{
+            setLoading(true);
+            setError("");
+            try {{
+              const [nextItems, nextMetrics] = await Promise.all([api.items({{ search, status }}), api.metrics()]);
+              setItems(nextItems);
+              setMetrics(nextMetrics);
+            }} catch (err) {{
+              setError(err.message);
+            }} finally {{
+              setLoading(false);
+            }}
+          }}
+
+          useEffect(() => {{
+            load();
+          }}, [search, status]);
+
+          const statusSummary = useMemo(() => metrics?.byStatus || [], [metrics]);
+
+          async function saveRecord(event) {{
+            event.preventDefault();
+            try {{
+              if (editingId) await api.update(editingId, form);
+              else await api.create(form);
+              setForm(emptyForm);
+              setEditingId(null);
+              await load();
+            }} catch (err) {{
+              setError(err.message);
+            }}
+          }}
+
+          async function deleteRecord(id) {{
+            await api.remove(id);
+            await load();
+          }}
+
+          async function resetDemo() {{
+            await api.reset();
+            setSearch("");
+            setStatus("all");
+            await load();
+          }}
+
+          function editRecord(item) {{
+            setEditingId(item.id);
+            setForm(item);
+            window.scrollTo({{ top: 0, behavior: "smooth" }});
+          }}
+
+          return (
+            <main className="app-shell">
+              <header className="topbar">
+                <div>
+                  <p className="eyebrow">SWARM-generated local app</p>
+                  <h1>{{t.appName}}</h1>
+                  <p>{{config.problem}}</p>
+                </div>
+                <div className="toolbar">
+                  <select value={{locale}} onChange={{(event) => setLocale(event.target.value)}} aria-label="Language">
+                    <option value="en">English</option>
+                    <option value="hi">हिन्दी</option>
+                    <option value="kn">ಕನ್ನಡ</option>
+                  </select>
+                  <button onClick={{resetDemo}}>{{t.reset}}</button>
+                </div>
+              </header>
+
+              {{error && <div className="alert">{{error}}</div>}}
+
+              <section className="metrics-grid">
+                <Metric label="Total" value={{metrics?.total ?? 0}} />
+                <Metric label="Open" value={{metrics?.open ?? 0}} />
+                <Metric label="Upcoming" value={{metrics?.upcoming ?? 0}} />
+                <Metric label="Revenue" value={{formatCurrency(metrics?.revenue ?? 0, locale)}} />
+              </section>
+
+              <section className="layout">
+                <form className="panel form-panel" onSubmit={{saveRecord}}>
+                  <div className="section-title">
+                    <h2>{{editingId ? "Edit record" : t.newRecord}}</h2>
+                    <span>{{config.audience}}</span>
+                  </div>
+                  <div className="form-grid">
+                    <Input label={{t.customer}} value={{form.customerName}} onChange={{(value) => setForm({{ ...form, customerName: value }})}} required />
+                    <Input label="Phone" value={{form.phone}} onChange={{(value) => setForm({{ ...form, phone: value }})}} />
+                    <Input label="Work title" value={{form.title}} onChange={{(value) => setForm({{ ...form, title: value }})}} required />
+                    <Input label={{t.dueDate}} type="date" value={{form.dueDate}} onChange={{(value) => setForm({{ ...form, dueDate: value }})}} required />
+                    <label>
+                      {{t.status}}
+                      <select value={{form.status}} onChange={{(event) => setForm({{ ...form, status: event.target.value }})}}>
+                        <option value="new">New</option>
+                        <option value="confirmed">Confirmed</option>
+                        <option value="in_progress">In progress</option>
+                        <option value="completed">Completed</option>
+                      </select>
+                    </label>
+                    <label>
+                      Priority
+                      <select value={{form.priority}} onChange={{(event) => setForm({{ ...form, priority: event.target.value }})}}>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                    <Input label={{t.amount}} type="number" value={{form.amount}} onChange={{(value) => setForm({{ ...form, amount: Number(value) }})}} />
+                    <label className="wide">
+                      Notes
+                      <textarea value={{form.notes}} onChange={{(event) => setForm({{ ...form, notes: event.target.value }})}} />
+                    </label>
+                  </div>
+                  <button className="primary" type="submit">{{t.save}}</button>
+                </form>
+
+                <section className="panel">
+                  <div className="section-title">
+                    <h2>{{t.records}}</h2>
+                    <span>{{loading ? "Loading..." : `${{items.length}} visible`}}</span>
+                  </div>
+                  <div className="filters">
+                    <input placeholder={{t.search}} value={{search}} onChange={{(event) => setSearch(event.target.value)}} />
+                    <select value={{status}} onChange={{(event) => setStatus(event.target.value)}}>
+                      <option value="all">All</option>
+                      <option value="new">New</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="in_progress">In progress</option>
+                      <option value="completed">Completed</option>
+                    </select>
+                  </div>
+                  <div className="status-row">
+                    {{statusSummary.map((entry) => <span key={{entry.status}}>{{entry.status}}: {{entry.count}}</span>)}}
+                  </div>
+                  {{items.length === 0 && !loading ? <div className="empty">{{t.empty}}</div> : (
+                    <div className="records">
+                      {{items.map((item) => (
+                        <article className="record-card" key={{item.id}}>
+                          <div>
+                            <h3>{{item.title}}</h3>
+                            <p>{{item.customerName}} · {{item.phone}}</p>
+                          </div>
+                          <div className="record-meta">
+                            <span>{{item.status.replace("_", " ")}}</span>
+                            <span>{{formatDate(item.dueDate, locale)}}</span>
+                            <strong>{{formatCurrency(item.amount, locale)}}</strong>
+                          </div>
+                          <p>{{item.notes}}</p>
+                          <div className="actions">
+                            <button onClick={{() => editRecord(item)}}>Edit</button>
+                            <button className="danger" onClick={{() => deleteRecord(item.id)}}>Delete</button>
+                          </div>
+                        </article>
+                      ))}}
+                    </div>
+                  )}}
+                </section>
+              </section>
+
+              <section className="panel">
+                <div className="section-title">
+                  <h2>What this MVP covers</h2>
+                  <span>Generated from one prompt</span>
+                </div>
+                <div className="feature-grid">
+                  {{config.features.map((feature) => <span key={{feature}}>{{feature}}</span>)}}
+                </div>
+              </section>
+            </main>
+          );
+        }}
+
+        function Metric({{ label, value }}) {{
+          return (
+            <div className="metric">
+              <span>{{label}}</span>
+              <strong>{{value}}</strong>
+            </div>
+          );
+        }}
+
+        function Input({{ label, value, onChange, type = "text", required = false }}) {{
+          return (
+            <label>
+              {{label}}
+              <input type={{type}} value={{value}} required={{required}} onChange={{(event) => onChange(event.target.value)}} />
+            </label>
+          );
+        }}
+        """
+    ).strip()
+
+
+def styles_css() -> str:
+    return dedent(
+        """
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f4f6f8; color: #111827; }
+        button, input, select, textarea { font: inherit; }
+        button { border: 0; border-radius: 6px; padding: 10px 14px; background: #e5e7eb; color: #111827; cursor: pointer; font-weight: 700; }
+        button:hover { background: #d1d5db; }
+        .primary { background: #2563eb; color: white; width: 100%; }
+        .primary:hover { background: #1d4ed8; }
+        .danger { color: #991b1b; background: #fee2e2; }
+        .app-shell { max-width: 1280px; margin: 0 auto; padding: 24px; }
+        .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 28px; border-radius: 10px; background: #111827; color: white; }
+        .topbar h1 { margin: 8px 0; font-size: 36px; line-height: 1.1; }
+        .topbar p { margin: 0; color: #cbd5e1; max-width: 760px; line-height: 1.6; }
+        .eyebrow { color: #93c5fd !important; text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; font-weight: 800; }
+        .toolbar { display: flex; gap: 10px; min-width: 260px; justify-content: flex-end; }
+        .toolbar select, .filters select, .filters input { min-height: 42px; border-radius: 6px; border: 1px solid #cbd5e1; padding: 0 12px; background: white; }
+        .alert { margin-top: 16px; border: 1px solid #fecaca; background: #fff1f2; color: #9f1239; padding: 12px 14px; border-radius: 8px; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+        .metric { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 18px; }
+        .metric span { color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; }
+        .metric strong { display: block; margin-top: 8px; font-size: 26px; }
+        .layout { display: grid; grid-template-columns: 390px minmax(0, 1fr); gap: 18px; align-items: start; }
+        .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+        .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+        .section-title h2 { margin: 0; font-size: 18px; }
+        .section-title span { color: #64748b; font-size: 13px; }
+        .form-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+        label { display: grid; gap: 6px; color: #334155; font-weight: 700; font-size: 13px; }
+        input, select, textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; min-height: 42px; padding: 10px 12px; background: #fbfdff; }
+        textarea { min-height: 92px; resize: vertical; }
+        .form-panel .primary { margin-top: 14px; }
+        .filters { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 10px; margin-bottom: 12px; }
+        .status-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .status-row span, .feature-grid span { border-radius: 999px; background: #eff6ff; color: #1d4ed8; padding: 7px 10px; font-size: 12px; font-weight: 800; }
+        .records { display: grid; gap: 12px; }
+        .record-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fbfdff; }
+        .record-card h3 { margin: 0 0 5px; font-size: 16px; }
+        .record-card p { margin: 6px 0; color: #475569; line-height: 1.5; }
+        .record-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+        .record-meta span, .record-meta strong { border-radius: 6px; background: #f1f5f9; padding: 6px 8px; font-size: 12px; }
+        .actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .empty { min-height: 220px; border: 1px dashed #cbd5e1; border-radius: 8px; display: grid; place-items: center; color: #64748b; background: #f8fafc; }
+        .feature-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+        @media (max-width: 900px) {
+          .topbar, .layout { grid-template-columns: 1fr; display: grid; }
+          .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .toolbar, .filters { grid-template-columns: 1fr; display: grid; min-width: 0; }
+        }
+        """
+    ).strip()
+
+
+def readme(payload: dict) -> str:
+    return dedent(
+        f"""
+        # {payload["productName"]}
+
+        This app was generated by SWARM.AI from one local-business prompt.
+
+        ## Problem
+
+        {payload["problem"]}
+
+        ## Audience
+
+        {payload["audience"]}
+
+        ## Features Covered
+
+        {chr(10).join(f"- {feature}" for feature in payload["features"])}
+
+        ## Business Rules
+
+        {chr(10).join(f"- {rule}" for rule in payload["businessRules"])}
+
+        ## Local Language Support
+
+        The app includes English, Hindi, and Kannada translation dictionaries, a language switcher, and `Intl` date/currency formatting for India.
+
+        ## Run Locally
+
+        ```bash
+        npm install
+        npm run dev
+        ```
+
+        API runs on `http://127.0.0.1:3001`.
+        Frontend runs on the Vite URL shown in the terminal.
+
+        ## Demo Flow
+
+        1. Review dashboard metrics.
+        2. Search and filter records by status.
+        3. Create a new record with customer, due date, priority, amount, and notes.
+        4. Edit the status to completed.
+        5. Switch language between English, Hindi, and Kannada.
+        6. Reset demo data.
+
+        ## Validation
+
+        ```bash
+        npm run check
+        npm run test
+        npm run build
+        ```
+        """
+    ).strip()
+
+
+def i18n_js(product_name: str) -> str:
+    return dedent(
+        f"""
+        export const translations = {{
+          en: {{ appName: "{product_name}", dashboard: "Dashboard", records: "Records", newRecord: "New record", search: "Search", status: "Status", customer: "Customer", dueDate: "Due date", followUpDate: "Follow-up date", amount: "Amount", payment: "Payment", service: "Service", assignedTo: "Assigned to", channel: "Channel", nextAction: "Next action", queue: "Daily queue", followUps: "Follow-ups due", pendingPayments: "Pending payments", localLanguage: "Local language", save: "Save", reset: "Reset demo data", empty: "No records match the current filters." }},
+          hi: {{ appName: "{product_name}", dashboard: "\\u0921\\u0948\\u0936\\u092c\\u094b\\u0930\\u094d\\u0921", records: "\\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921", newRecord: "\\u0928\\u092f\\u093e \\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921", search: "\\u0916\\u094b\\u091c\\u0947\\u0902", status: "\\u0938\\u094d\\u0925\\u093f\\u0924\\u093f", customer: "\\u0917\\u094d\\u0930\\u093e\\u0939\\u0915", dueDate: "\\u0921\\u093f\\u0932\\u093f\\u0935\\u0930\\u0940 \\u0924\\u093e\\u0930\\u0940\\u0916", followUpDate: "\\u092b\\u0949\\u0932\\u094b-\\u0905\\u092a \\u0924\\u093e\\u0930\\u0940\\u0916", amount: "\\u0930\\u093e\\u0936\\u093f", payment: "\\u092d\\u0941\\u0917\\u0924\\u093e\\u0928", service: "\\u0938\\u0947\\u0935\\u093e", assignedTo: "\\u091c\\u093f\\u092e\\u094d\\u092e\\u0947\\u0926\\u093e\\u0930", channel: "\\u091a\\u0948\\u0928\\u0932", nextAction: "\\u0905\\u0917\\u0932\\u093e \\u0915\\u0926\\u092e", queue: "\\u0906\\u091c \\u0915\\u0940 \\u0915\\u0924\\u093e\\u0930", followUps: "\\u092b\\u0949\\u0932\\u094b-\\u0905\\u092a \\u092c\\u093e\\u0915\\u0940", pendingPayments: "\\u092c\\u0915\\u093e\\u092f\\u093e \\u092d\\u0941\\u0917\\u0924\\u093e\\u0928", localLanguage: "\\u0938\\u094d\\u0925\\u093e\\u0928\\u0940\\u092f \\u092d\\u093e\\u0937\\u093e", save: "\\u0938\\u0947\\u0935 \\u0915\\u0930\\u0947\\u0902", reset: "\\u0921\\u0947\\u092e\\u094b \\u0921\\u0947\\u091f\\u093e \\u0930\\u0940\\u0938\\u0947\\u091f", empty: "\\u0907\\u0928 \\u092b\\u093f\\u0932\\u094d\\u091f\\u0930 \\u0915\\u0947 \\u0932\\u093f\\u090f \\u0915\\u094b\\u0908 \\u0930\\u093f\\u0915\\u0949\\u0930\\u094d\\u0921 \\u0928\\u0939\\u0940\\u0902 \\u092e\\u093f\\u0932\\u093e." }},
+          kn: {{ appName: "{product_name}", dashboard: "\\u0ca1\\u0ccd\\u0caf\\u0cbe\\u0cb6\\u0ccd\\u0cac\\u0ccb\\u0cb0\\u0ccd\\u0ca1\\u0ccd", records: "\\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6\\u0c97\\u0cb3\\u0cc1", newRecord: "\\u0cb9\\u0cca\\u0cb8 \\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6", search: "\\u0cb9\\u0cc1\\u0ca1\\u0cc1\\u0c95\\u0cbf", status: "\\u0cb8\\u0ccd\\u0ca5\\u0cbf\\u0ca4\\u0cbf", customer: "\\u0c97\\u0ccd\\u0cb0\\u0cbe\\u0cb9\\u0c95", dueDate: "\\u0ca1\\u0cc6\\u0cb2\\u0cbf\\u0cb5\\u0cb0\\u0cbf \\u0ca6\\u0cbf\\u0ca8\\u0cbe\\u0c82\\u0c95", followUpDate: "\\u0cab\\u0cbe\\u0cb2\\u0ccb-\\u0c85\\u0caa\\u0ccd \\u0ca6\\u0cbf\\u0ca8\\u0cbe\\u0c82\\u0c95", amount: "\\u0cae\\u0cca\\u0ca4\\u0ccd\\u0ca4", payment: "\\u0caa\\u0cbe\\u0cb5\\u0ca4\\u0cbf", service: "\\u0cb8\\u0cc7\\u0cb5\\u0cc6", assignedTo: "\\u0c9c\\u0cb5\\u0cbe\\u0cac\\u0ccd\\u0ca6\\u0cbe\\u0cb0\\u0cb0\\u0cc1", channel: "\\u0c9a\\u0ccd\\u0caf\\u0cbe\\u0ca8\\u0cb2\\u0ccd", nextAction: "\\u0cae\\u0cc1\\u0c82\\u0ca6\\u0cbf\\u0ca8 \\u0c95\\u0ccd\\u0cb0\\u0cae", queue: "\\u0c87\\u0c82\\u0ca6\\u0cbf\\u0ca8 \\u0c95\\u0ca4\\u0cbe\\u0cb0\\u0cc1", followUps: "\\u0cab\\u0cbe\\u0cb2\\u0ccb-\\u0c85\\u0caa\\u0ccd \\u0cac\\u0cbe\\u0c95\\u0cbf", pendingPayments: "\\u0cac\\u0cbe\\u0c95\\u0cbf \\u0caa\\u0cbe\\u0cb5\\u0ca4\\u0cbf", localLanguage: "\\u0cb8\\u0ccd\\u0ca5\\u0cb3\\u0cc0\\u0caf \\u0cad\\u0cbe\\u0cb7\\u0cc6", save: "\\u0c89\\u0cb3\\u0cbf\\u0cb8\\u0cbf", reset: "\\u0ca1\\u0cc6\\u0cae\\u0ccb \\u0ca1\\u0cc7\\u0c9f\\u0cbe \\u0cae\\u0cb0\\u0cc1\\u0cb9\\u0cca\\u0c82\\u0ca6\\u0cbf\\u0cb8\\u0cbf", empty: "\\u0c88 \\u0cab\\u0cbf\\u0cb2\\u0ccd\\u0c9f\\u0cb0\\u0ccd\\u0c97\\u0cb3\\u0cbf\\u0c97\\u0cc6 \\u0ca6\\u0cbe\\u0c96\\u0cb2\\u0cc6\\u0c97\\u0cb3\\u0cbf\\u0cb2\\u0ccd\\u0cb2." }},
+        }};
+
+        export function formatCurrency(value, locale) {{
+          return new Intl.NumberFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN", {{ style: "currency", currency: "INR", maximumFractionDigits: 0 }}).format(value || 0);
+        }}
+
+        export function formatDate(value, locale) {{
+          return new Intl.DateTimeFormat(locale === "hi" ? "hi-IN" : locale === "kn" ? "kn-IN" : "en-IN").format(new Date(value));
+        }}
+        """
+    ).strip()
+
+
+def app_jsx(payload: dict) -> str:
+    config = json.dumps(payload, indent=2)
+    return dedent(
+        f"""
+        import {{ useEffect, useMemo, useState }} from "react";
+        import {{ api }} from "./api.js";
+        import {{ formatCurrency, formatDate, translations }} from "./i18n.js";
+
+        const config = {config};
+        const emptyForm = {{
+          customerName: "",
+          phone: "",
+          title: "",
+          category: config.productName,
+          serviceType: "",
+          status: "new",
+          priority: "medium",
+          dueDate: "2026-06-20",
+          followUpDate: "2026-06-18",
+          paymentStatus: "pending",
+          assignedTo: "Owner",
+          channel: "WhatsApp",
+          progress: 0,
+          amount: 0,
+          nextAction: "",
+          notes: "",
+          language: "en",
+        }};
+
+        export default function App() {{
+          const [items, setItems] = useState([]);
+          const [metrics, setMetrics] = useState(null);
+          const [form, setForm] = useState(emptyForm);
+          const [editingId, setEditingId] = useState(null);
+          const [search, setSearch] = useState("");
+          const [status, setStatus] = useState("all");
+          const [locale, setLocale] = useState("en");
+          const [loading, setLoading] = useState(true);
+          const [error, setError] = useState("");
+          const t = translations[locale];
+
+          async function load() {{
+            setLoading(true);
+            setError("");
+            try {{
+              const [nextItems, nextMetrics] = await Promise.all([api.items({{ search, status }}), api.metrics()]);
+              setItems(nextItems);
+              setMetrics(nextMetrics);
+            }} catch (err) {{
+              setError(err.message);
+            }} finally {{
+              setLoading(false);
+            }}
+          }}
+
+          useEffect(() => {{ load(); }}, [search, status]);
+
+          const statusSummary = useMemo(() => metrics?.byStatus || [], [metrics]);
+          const queue = metrics?.productionQueue || [];
+
+          async function saveRecord(event) {{
+            event.preventDefault();
+            try {{
+              const payload = {{ ...form, serviceType: form.serviceType || form.title, nextAction: form.nextAction || "Follow up before due date" }};
+              if (editingId) await api.update(editingId, payload);
+              else await api.create(payload);
+              setForm(emptyForm);
+              setEditingId(null);
+              await load();
+            }} catch (err) {{
+              setError(err.message);
+            }}
+          }}
+
+          async function deleteRecord(id) {{
+            await api.remove(id);
+            await load();
+          }}
+
+          async function resetDemo() {{
+            await api.reset();
+            setSearch("");
+            setStatus("all");
+            await load();
+          }}
+
+          function editRecord(item) {{
+            setEditingId(item.id);
+            setForm({{ ...emptyForm, ...item }});
+            window.scrollTo({{ top: 0, behavior: "smooth" }});
+          }}
+
+          return (
+            <main className="app-shell">
+              <header className="topbar">
+                <div>
+                  <p className="eyebrow">SWARM local-business app</p>
+                  <h1>{{t.appName}}</h1>
+                  <p>{{config.problem}}</p>
+                  <div className="hero-tags">
+                    <span>{{config.businessType}}</span>
+                    <span>{{config.recordLabel}}</span>
+                    <span>{{t.localLanguage}}</span>
+                  </div>
+                </div>
+                <div className="toolbar">
+                  <select value={{locale}} onChange={{(event) => setLocale(event.target.value)}} aria-label="Language">
+                    <option value="en">English</option>
+                    <option value="hi">\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940</option>
+                    <option value="kn">\\u0c95\\u0ca8\\u0ccd\\u0ca8\\u0ca1</option>
+                  </select>
+                  <button onClick={{resetDemo}}>{{t.reset}}</button>
+                </div>
+              </header>
+
+              {{error && <div className="alert">{{error}}</div>}}
+
+              <section className="metrics-grid">
+                <Metric label="Open" value={{metrics?.open ?? 0}} />
+                <Metric label="Overdue" value={{metrics?.overdue ?? 0}} urgent />
+                <Metric label={{t.followUps}} value={{metrics?.followUpsDue ?? 0}} />
+                <Metric label={{t.pendingPayments}} value={{metrics?.pendingPayments ?? 0}} />
+                <Metric label="Revenue" value={{formatCurrency(metrics?.revenue ?? 0, locale)}} />
+                <Metric label="Pending value" value={{formatCurrency(metrics?.pendingRevenue ?? 0, locale)}} />
+              </section>
+
+              <section className="layout">
+                <form className="panel form-panel" onSubmit={{saveRecord}}>
+                  <div className="section-title">
+                    <h2>{{editingId ? "Edit " + config.recordLabel : t.newRecord}}</h2>
+                    <span>{{config.audience}}</span>
+                  </div>
+                  <div className="form-grid">
+                    <Input label={{t.customer}} value={{form.customerName}} onChange={{(value) => setForm({{ ...form, customerName: value }})}} required />
+                    <Input label="Phone" value={{form.phone}} onChange={{(value) => setForm({{ ...form, phone: value }})}} />
+                    <Input label="Work title" value={{form.title}} onChange={{(value) => setForm({{ ...form, title: value }})}} required />
+                    <Input label={{t.service}} value={{form.serviceType}} onChange={{(value) => setForm({{ ...form, serviceType: value }})}} />
+                    <Input label={{t.dueDate}} type="date" value={{form.dueDate}} onChange={{(value) => setForm({{ ...form, dueDate: value }})}} required />
+                    <Input label={{t.followUpDate}} type="date" value={{form.followUpDate}} onChange={{(value) => setForm({{ ...form, followUpDate: value }})}} />
+                    <Select label={{t.status}} value={{form.status}} onChange={{(value) => setForm({{ ...form, status: value }})}} options={{["new", "confirmed", "in_progress", "completed"]}} />
+                    <Select label="Priority" value={{form.priority}} onChange={{(value) => setForm({{ ...form, priority: value }})}} options={{["low", "medium", "high"]}} />
+                    <Select label={{t.payment}} value={{form.paymentStatus}} onChange={{(value) => setForm({{ ...form, paymentStatus: value }})}} options={{["pending", "partial", "paid"]}} />
+                    <Input label={{t.assignedTo}} value={{form.assignedTo}} onChange={{(value) => setForm({{ ...form, assignedTo: value }})}} />
+                    <Input label={{t.channel}} value={{form.channel}} onChange={{(value) => setForm({{ ...form, channel: value }})}} />
+                    <Input label={{t.amount}} type="number" value={{form.amount}} onChange={{(value) => setForm({{ ...form, amount: Number(value) }})}} />
+                    <Input label="Progress %" type="number" value={{form.progress}} onChange={{(value) => setForm({{ ...form, progress: Number(value) }})}} />
+                    <Input label={{t.nextAction}} value={{form.nextAction}} onChange={{(value) => setForm({{ ...form, nextAction: value }})}} />
+                    <label className="wide">Notes<textarea value={{form.notes}} onChange={{(event) => setForm({{ ...form, notes: event.target.value }})}} /></label>
+                  </div>
+                  <button className="primary" type="submit">{{t.save}}</button>
+                </form>
+
+                <section className="panel">
+                  <div className="section-title">
+                    <h2>{{t.records}}</h2>
+                    <span>{{loading ? "Loading..." : String(items.length) + " visible"}}</span>
+                  </div>
+                  <div className="filters">
+                    <input placeholder={{t.search}} value={{search}} onChange={{(event) => setSearch(event.target.value)}} />
+                    <select value={{status}} onChange={{(event) => setStatus(event.target.value)}}>
+                      <option value="all">All</option>
+                      <option value="new">New</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="in_progress">In progress</option>
+                      <option value="completed">Completed</option>
+                    </select>
+                  </div>
+                  <div className="status-row">{{statusSummary.map((entry) => <span key={{entry.status}}>{{entry.status}}: {{entry.count}}</span>)}}</div>
+                  {{items.length === 0 && !loading ? <div className="empty">{{t.empty}}</div> : (
+                    <div className="records">
+                      {{items.map((item) => (
+                        <article className="record-card" key={{item.id}}>
+                          <div className="record-head">
+                            <div><h3>{{item.title}}</h3><p>{{item.customerName}} - {{item.phone}}</p></div>
+                            <strong>{{formatCurrency(item.amount, locale)}}</strong>
+                          </div>
+                          <div className="record-meta">
+                            <span>{{item.status.replace("_", " ")}}</span>
+                            <span>{{item.paymentStatus}}</span>
+                            <span>{{item.priority}}</span>
+                            <span>{{formatDate(item.dueDate, locale)}}</span>
+                          </div>
+                          <div className="progress"><span style={{{{ width: Math.min(100, Number(item.progress || 0)) + "%" }}}} /></div>
+                          <p><b>{{t.service}}:</b> {{item.serviceType}} | <b>{{t.assignedTo}}:</b> {{item.assignedTo}} | <b>{{t.channel}}:</b> {{item.channel}}</p>
+                          <p><b>{{t.nextAction}}:</b> {{item.nextAction}}</p>
+                          <p>{{item.notes}}</p>
+                          <div className="actions"><button onClick={{() => editRecord(item)}}>Edit</button><button className="danger" onClick={{() => deleteRecord(item.id)}}>Delete</button></div>
+                        </article>
+                      ))}}
+                    </div>
+                  )}}
+                </section>
+              </section>
+
+              <section className="insight-grid">
+                <div className="panel">
+                  <div className="section-title"><h2>{{t.queue}}</h2><span>{{config.queueLabel}}</span></div>
+                  <div className="queue-list">
+                    {{queue.map((item) => <div key={{item.id}}><strong>{{item.title}}</strong><span>{{formatDate(item.dueDate, locale)}} - {{item.assignedTo}}</span></div>)}}
+                  </div>
+                </div>
+                <div className="panel">
+                  <div className="section-title"><h2>What this MVP covers</h2><span>Generated from one prompt</span></div>
+                  <div className="feature-grid">{{config.features.map((feature) => <span key={{feature}}>{{feature}}</span>)}}</div>
+                </div>
+              </section>
+            </main>
+          );
+        }}
+
+        function Metric({{ label, value, urgent = false }}) {{
+          return <div className={{"metric " + (urgent ? "urgent" : "")}}><span>{{label}}</span><strong>{{value}}</strong></div>;
+        }}
+
+        function Input({{ label, value, onChange, type = "text", required = false }}) {{
+          return <label>{{label}}<input type={{type}} value={{value}} required={{required}} onChange={{(event) => onChange(event.target.value)}} /></label>;
+        }}
+
+        function Select({{ label, value, onChange, options }}) {{
+          return <label>{{label}}<select value={{value}} onChange={{(event) => onChange(event.target.value)}}>{{options.map((option) => <option key={{option}} value={{option}}>{{option.replace("_", " ")}}</option>)}}</select></label>;
+        }}
+        """
+    ).strip()
+
+
+def styles_css() -> str:
+    return dedent(
+        """
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f4f6f8; color: #111827; }
+        button, input, select, textarea { font: inherit; }
+        button { border: 0; border-radius: 6px; padding: 10px 14px; background: #e5e7eb; color: #111827; cursor: pointer; font-weight: 700; }
+        button:hover { background: #d1d5db; }
+        .primary { background: #2563eb; color: white; width: 100%; }
+        .danger { color: #991b1b; background: #fee2e2; }
+        .app-shell { max-width: 1360px; margin: 0 auto; padding: 24px; }
+        .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 28px; border-radius: 10px; background: #102033; color: white; }
+        .topbar h1 { margin: 8px 0; font-size: 36px; line-height: 1.1; }
+        .topbar p { margin: 0; color: #d5dee9; max-width: 780px; line-height: 1.6; }
+        .eyebrow { color: #93c5fd !important; text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; font-weight: 800; }
+        .hero-tags, .status-row, .feature-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+        .hero-tags span, .status-row span, .feature-grid span { border-radius: 999px; background: #eff6ff; color: #1d4ed8; padding: 7px 10px; font-size: 12px; font-weight: 800; }
+        .hero-tags span { background: rgba(255,255,255,0.12); color: white; }
+        .toolbar { display: flex; gap: 10px; min-width: 280px; justify-content: flex-end; }
+        .toolbar select, .filters select, .filters input { min-height: 42px; border-radius: 6px; border: 1px solid #cbd5e1; padding: 0 12px; background: white; }
+        .alert { margin-top: 16px; border: 1px solid #fecaca; background: #fff1f2; color: #9f1239; padding: 12px 14px; border-radius: 8px; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+        .metric { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 16px; }
+        .metric.urgent { border-color: #fecaca; background: #fff7f7; }
+        .metric span { color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .metric strong { display: block; margin-top: 8px; font-size: 23px; }
+        .layout { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 18px; align-items: start; }
+        .insight-grid { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: 18px; margin-top: 18px; }
+        .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+        .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+        .section-title h2 { margin: 0; font-size: 18px; }
+        .section-title span { color: #64748b; font-size: 13px; }
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .wide { grid-column: 1 / -1; }
+        label { display: grid; gap: 6px; color: #334155; font-weight: 700; font-size: 13px; }
+        input, select, textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; min-height: 42px; padding: 10px 12px; background: #fbfdff; }
+        textarea { min-height: 92px; resize: vertical; }
+        .form-panel .primary { margin-top: 14px; }
+        .filters { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 10px; margin-bottom: 12px; }
+        .records, .queue-list { display: grid; gap: 12px; }
+        .record-card, .queue-list div { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fbfdff; }
+        .record-head { display: flex; justify-content: space-between; gap: 16px; }
+        .record-card h3 { margin: 0 0 5px; font-size: 16px; }
+        .record-card p, .queue-list span { margin: 6px 0; color: #475569; line-height: 1.5; font-size: 14px; }
+        .record-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+        .record-meta span, .record-meta strong { border-radius: 6px; background: #f1f5f9; padding: 6px 8px; font-size: 12px; }
+        .progress { height: 8px; border-radius: 999px; overflow: hidden; background: #e5e7eb; margin: 10px 0; }
+        .progress span { display: block; height: 100%; background: #16a34a; }
+        .actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .empty { min-height: 220px; border: 1px dashed #cbd5e1; border-radius: 8px; display: grid; place-items: center; color: #64748b; background: #f8fafc; }
+        @media (max-width: 980px) {
+          .topbar, .layout, .insight-grid { grid-template-columns: 1fr; display: grid; }
+          .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .toolbar, .filters, .form-grid { grid-template-columns: 1fr; display: grid; min-width: 0; }
+        }
+        """
+    ).strip()
+
+
+def readme(payload: dict) -> str:
+    return dedent(
+        f"""
+        # {payload["productName"]}
+
+        This runnable local-business app was generated by SWARM.AI from one plain-language prompt.
+
+        ## Why This Is Different
+
+        SWARM.AI generated a domain-aware operations app for a {payload["businessType"]}, not a generic landing page. The app includes customer records, daily queue tracking, reminders, payment status, dashboard metrics, seed data, local-language UX, tests, and a local API.
+
+        ## Problem
+
+        {payload["problem"]}
+
+        ## Audience
+
+        {payload["audience"]}
+
+        ## Features Covered
+
+        {chr(10).join(f"- {feature}" for feature in payload["features"])}
+
+        ## Business Rules
+
+        {chr(10).join(f"- {rule}" for rule in payload["businessRules"])}
+
+        ## Local Language Support
+
+        The app includes English, Hindi, and Kannada translation dictionaries, a language switcher, and `Intl` date/currency formatting for India.
+
+        ## Run Locally
+
+        ```bash
+        npm install
+        npm run dev
+        ```
+
+        API runs on `http://127.0.0.1:3001`.
+        Frontend runs on the Vite URL shown in the terminal.
+
+        ## Demo Flow
+
+        1. Review open, overdue, follow-up, payment, and revenue metrics.
+        2. Use the daily queue to see work due next.
+        3. Search/filter records by customer, service, staff, status, or payment state.
+        4. Create a new {payload["recordLabel"]} with customer, due date, follow-up date, payment status, assigned staff, amount, progress, and next action.
+        5. Edit status/progress/payment and confirm the dashboard updates.
+        6. Switch language between English, Hindi, and Kannada.
+        7. Reset demo data.
+
+        ## Validation
+
+        ```bash
+        npm run check
+        npm run test
+        npm run build
+        ```
+        """
+    ).strip()

@@ -1,674 +1,758 @@
-"""Filesystem and persistence utilities for SWARM runs."""
-
-from __future__ import annotations
-
 import json
-import os
 import re
 import shutil
-import signal
 import subprocess
-import time
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-DEFAULT_OUTPUT_ROOT = Path(os.getenv("SWARM_OUTPUT_DIR", "outputs"))
-RUN_SUMMARY_FILE = "summary.json"
-GENERATED_APP_DIR = "generated-app"
-VALIDATION_FILE = "validation.json"
-QUALITY_FILE = "quality.json"
-PREVIEW_API_PORT = 3001
-PREVIEW_FRONTEND_PORT = 6200
-PREVIEW_FILE = "preview.json"
-PREVIEW_PROCESSES: dict[str, dict[str, subprocess.Popen[str]]] = {}
+from backend.state import AGENT_ORDER, ProjectState, initial_agent_statuses
+
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+PROMPTS_DIR = BASE_DIR / "prompts"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+GENERATED_APPS_DIR = PROJECT_ROOT / "generated_apps"
+QUALITY_MIN_SCORE = 90
+QUALITY_TARGET_SCORE = 90
+GENERATED_FILE_EXCLUDES = {
+    ".git",
+    ".next",
+    ".turbo",
+    ".vite",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+}
 
 
-def ensure_output_root(root: str | Path | None = None) -> Path:
-    """Create and return the output root directory."""
-    output_root = Path(root) if root is not None else DEFAULT_OUTPUT_ROOT
-    output_root.mkdir(parents=True, exist_ok=True)
-    return output_root
-
-
-def get_run_output_dir(
-    run_id: str,
-    root: str | Path | None = None,
-    create: bool = True,
-) -> Path:
-    """Return the output directory for a run."""
-    output_root = ensure_output_root(root)
-    run_dir = _safe_child_path(output_root, run_id)
-    if create:
-        run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def write_json(path: str | Path, data: Any) -> Path:
-    """Write JSON data with stable formatting."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    return target
-
-
-def read_json(path: str | Path, default: Any = None) -> Any:
-    """Read JSON data, returning default when the file is absent."""
-    source = Path(path)
-    if not source.exists():
-        return default
-    return json.loads(source.read_text(encoding="utf-8"))
+def load_prompt(filename: str) -> str:
+    return (PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
 def strip_markdown_fences(text: str) -> str:
-    """Remove a single wrapping Markdown code fence from text."""
-    stripped = text.strip()
-    fence_match = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    cleaned = text.strip()
+    fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", cleaned, re.DOTALL | re.IGNORECASE)
     if fence_match:
         return fence_match.group(1).strip()
-    return stripped
+    return cleaned
 
 
-def extract_json_text(text: str) -> str:
-    """Extract the first complete JSON object or array from model output."""
-    stripped = strip_markdown_fences(text)
-    starts = [index for index in (stripped.find("{"), stripped.find("[")) if index != -1]
-    if not starts:
-        raise ValueError("No JSON object or array found in text.")
+def parse_json_response(text: str) -> dict[str, Any]:
+    cleaned = strip_markdown_fences(text)
+    try:
+        return json.loads(cleaned, strict=False)
+    except json.JSONDecodeError:
+        extracted = extract_json_object(cleaned)
+        if extracted is None:
+            raise
+        return json.loads(extracted, strict=False)
 
-    start = min(starts)
-    opening = stripped[start]
-    closing = "}" if opening == "{" else "]"
+
+def extract_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start == -1:
+        return None
+
     depth = 0
     in_string = False
-    escaped = False
-
-    for index in range(start, len(stripped)):
-        char = stripped[index]
-
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == '"':
-            in_string = not in_string
-            continue
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
         if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
             continue
-        if char == opening:
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
             depth += 1
-        elif char == closing:
+        elif char == "}":
             depth -= 1
             if depth == 0:
-                return stripped[start : index + 1]
+                return text[start : index + 1]
 
-    raise ValueError("JSON text is incomplete.")
-
-
-def repair_json_text(text: str) -> str:
-    """Apply conservative repairs for common LLM JSON formatting mistakes."""
-    repaired = extract_json_text(text)
-    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
-    repaired = repaired.replace("\u201c", '"').replace("\u201d", '"')
-    repaired = repaired.replace("\u2018", "'").replace("\u2019", "'")
-    return repaired
+    return None
 
 
-def parse_json_text(text: str) -> Any:
-    """Parse JSON from raw text, fenced Markdown, or prose-wrapped output."""
-    json_text = extract_json_text(text)
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError:
-        return json.loads(repair_json_text(json_text))
+def output_dir(run_id: str) -> Path:
+    path = OUTPUTS_DIR / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def write_text(path: str | Path, content: str) -> Path:
-    """Write UTF-8 text content."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return target
+def write_json(run_id: str, filename: str, data: Any) -> None:
+    path = output_dir(run_id) / filename
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def read_text(path: str | Path, default: str | None = None) -> str | None:
-    """Read UTF-8 text, returning default when the file is absent."""
-    source = Path(path)
-    if not source.exists():
-        return default
-    return source.read_text(encoding="utf-8")
+def write_text(run_id: str, filename: str, data: str) -> None:
+    path = output_dir(run_id) / filename
+    path.write_text(data, encoding="utf-8")
 
 
-def write_run_summary(
-    run_id: str,
-    summary: dict[str, Any],
-    root: str | Path | None = None,
-) -> Path:
-    """Persist a run summary file."""
-    return write_json(get_run_output_dir(run_id, root) / RUN_SUMMARY_FILE, summary)
+def write_code_files(run_id: str, files: dict[str, str]) -> None:
+    root = output_dir(run_id) / "code_files"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for relative_path, content in files.items():
+        if _has_excluded_part(Path(relative_path)):
+            continue
+        safe_path = _safe_output_path(root, relative_path)
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content, encoding="utf-8")
 
 
-def load_run_summary(
-    run_id: str,
-    root: str | Path | None = None,
-) -> dict[str, Any] | None:
-    """Load a run summary file if it exists."""
-    return read_json(get_run_output_dir(run_id, root, create=False) / RUN_SUMMARY_FILE)
-
-
-def write_code_file(run_dir: str | Path, relative_path: str | Path, content: str) -> Path:
-    """Write a generated code file below a run directory."""
-    target = _safe_child_path(Path(run_dir), relative_path)
-    return write_text(target, content)
-
-
-def read_code_file(
-    run_dir: str | Path,
-    relative_path: str | Path,
-    default: str | None = None,
-) -> str | None:
-    """Read a generated code file below a run directory."""
-    target = _safe_child_path(Path(run_dir), relative_path)
-    return read_text(target, default)
-
-
-def get_generated_app_dir(run_id: str, root: str | Path | None = None) -> Path:
-    """Return the materialized generated app directory for a run."""
-    return get_run_output_dir(run_id, root, create=False) / GENERATED_APP_DIR
-
-
-def materialize_generated_app(
-    run_id: str,
-    generated_files: dict[str, str],
-    root: str | Path | None = None,
-) -> Path:
-    """Write a generated file map into the generated app directory."""
-    run_dir = get_run_output_dir(run_id, root)
-    app_dir = run_dir / GENERATED_APP_DIR
-    for relative_path, content in generated_files.items():
-        write_code_file(app_dir, relative_path, content)
-    write_json(run_dir / "generated_files.json", sorted(generated_files.keys()))
-    return app_dir
-
-
-def collect_artifact_summary(
-    run_id: str,
-    state: dict[str, Any] | None = None,
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Return a compact summary of run artifacts."""
-    run_dir = get_run_output_dir(run_id, root, create=False)
-    app_dir = run_dir / GENERATED_APP_DIR
-    generated_paths = _list_relative_files(app_dir) if app_dir.exists() else []
-
+def write_run_summary(state: dict[str, Any]) -> None:
     summary = {
-        "run_id": run_id,
-        "run_dir": str(run_dir),
-        "generated_app_dir": str(app_dir) if app_dir.exists() else None,
-        "requirements": _artifact_file(run_dir / "requirements.json"),
-        "architecture": _artifact_file(run_dir / "architecture.json"),
-        "pitch_deck": _artifact_file(run_dir / "pitch_deck.json"),
-        "summary": _artifact_file(run_dir / RUN_SUMMARY_FILE),
-        "generated_files": generated_paths,
-        "generated_file_count": len(generated_paths),
-        "validation": read_json(run_dir / VALIDATION_FILE, default=None),
-        "quality": read_json(run_dir / QUALITY_FILE, default=None),
+        "run_id": state.get("run_id"),
+        "idea": state.get("idea", ""),
+        "current_agent": state.get("current_agent"),
+        "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
+        "done": state.get("done", False),
+        "errors": state.get("errors", []),
+        "created_at": state.get("created_at"),
+        "updated_at": state.get("updated_at"),
+        "has_requirements": bool(state.get("requirements")),
+        "has_architecture": bool(state.get("architecture")),
+        "code_file_count": len(state.get("code_files", {})),
+        "has_pitch_deck": bool(state.get("pitch_deck")),
     }
-    if state:
-        summary["status"] = state.get("status")
-        summary["prompt"] = state.get("prompt")
-    return summary
+    write_json(str(state["run_id"]), "run_summary.json", summary)
 
 
-def zip_generated_app(run_id: str, root: str | Path | None = None) -> Path:
-    """Create a zip archive for the materialized generated app."""
-    run_dir = get_run_output_dir(run_id, root, create=False)
-    app_dir = run_dir / GENERATED_APP_DIR
-    if not app_dir.exists():
-        raise FileNotFoundError(f"Generated app not found for run {run_id}.")
+def append_error(state: dict[str, Any], message: str, agent: str | None = None) -> None:
+    state.setdefault("errors", []).append(message)
+    state["updated_at"] = utc_now()
+    if agent:
+        set_agent_status(state, agent, "error")
 
-    zip_path = run_dir / "generated-app.zip"
+
+def set_agent_status(state: dict[str, Any], agent: str, status: str) -> None:
+    state.setdefault("agent_statuses", initial_agent_statuses())
+    state["agent_statuses"][agent] = status
+    state["current_agent"] = agent
+    state["updated_at"] = utc_now()
+
+
+def complete_agent(state: dict[str, Any], agent: str) -> None:
+    statuses = state.setdefault("agent_statuses", initial_agent_statuses())
+    if statuses.get(agent) != "error":
+        statuses[agent] = "done"
+    state["updated_at"] = utc_now()
+
+
+def load_run_from_disk(run_id: str) -> ProjectState | None:
+    root = OUTPUTS_DIR / run_id
+    summary = _read_json(root / "run_summary.json")
+    if not summary:
+        return None
+
+    state: ProjectState = {
+        "run_id": run_id,
+        "idea": summary.get("idea", ""),
+        "requirements": _read_json(root / "requirements.json") or {},
+        "architecture": _read_json(root / "architecture.json") or {},
+        "builder_prompt": _read_text(root / "builder_prompt.txt"),
+        "code_files": read_code_files(run_id),
+        "pitch_deck": _read_json(root / "pitch_deck.json") or {},
+        "current_agent": summary.get("current_agent", "unknown"),
+        "agent_statuses": summary.get("agent_statuses", initial_agent_statuses()),
+        "errors": summary.get("errors", []),
+        "done": summary.get("done", False),
+        "created_at": summary.get("created_at", ""),
+        "updated_at": summary.get("updated_at", ""),
+    }
+    return state
+
+
+def list_run_summaries() -> list[dict[str, Any]]:
+    if not OUTPUTS_DIR.exists():
+        return []
+    summaries = []
+    for path in OUTPUTS_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        summary = _read_json(path / "run_summary.json")
+        if summary:
+            summaries.append(summary)
+    return sorted(summaries, key=lambda item: item.get("run_id", ""), reverse=True)
+
+
+def read_code_files(run_id: str) -> dict[str, str]:
+    root = OUTPUTS_DIR / run_id / "code_files"
+    if not root.exists():
+        return {}
+    files: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if path.is_file() and not _has_excluded_part(path.relative_to(root)):
+            files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
+    return files
+
+
+def build_artifact_summary(run_id: str) -> dict[str, Any]:
+    state = load_run_from_disk(run_id)
+    if not state:
+        return {}
+
+    code_files = state.get("code_files", {})
+    package_json = {}
+    if "package.json" in code_files:
+        try:
+            package_json = json.loads(code_files["package.json"])
+        except json.JSONDecodeError:
+            package_json = {}
+
+    extensions: dict[str, int] = {}
+    for path in code_files:
+        suffix = Path(path).suffix.lower() or "[none]"
+        extensions[suffix] = extensions.get(suffix, 0) + 1
+
+    return {
+        "run_id": run_id,
+        "idea": state.get("idea", ""),
+        "done": state.get("done", False),
+        "current_agent": state.get("current_agent", "unknown"),
+        "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
+        "errors": state.get("errors", []),
+        "created_at": state.get("created_at", ""),
+        "updated_at": state.get("updated_at", ""),
+        "artifact_counts": {
+            "requirements": int(bool(state.get("requirements"))),
+            "architecture": int(bool(state.get("architecture"))),
+            "code_files": len(code_files),
+            "pitch_deck_fields": len(state.get("pitch_deck", {})),
+        },
+        "code_file_paths": sorted(code_files.keys()),
+        "code_file_extensions": extensions,
+        "detected_app": {
+            "name": package_json.get("name", ""),
+            "scripts": package_json.get("scripts", {}),
+            "dependencies": sorted((package_json.get("dependencies") or {}).keys()),
+            "dev_dependencies": sorted((package_json.get("devDependencies") or {}).keys()),
+        },
+        "download_url": f"/download/{run_id}",
+        "validation": read_validation_report(run_id),
+        "quality": read_quality_report(run_id),
+    }
+
+
+def build_demo_summary(run_id: str) -> dict[str, Any]:
+    state = load_run_from_disk(run_id)
+    if not state:
+        return {}
+
+    artifacts = build_artifact_summary(run_id)
+    requirements = state.get("requirements", {})
+    architecture = state.get("architecture", {})
+    pitch = state.get("pitch_deck", {})
+    validation = artifacts.get("validation") or {}
+    quality = artifacts.get("quality") or {}
+
+    return {
+        "run_id": run_id,
+        "idea": state.get("idea", ""),
+        "status": {
+            "done": state.get("done", False),
+            "current_agent": state.get("current_agent", "unknown"),
+            "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
+            "errors": state.get("errors", []),
+        },
+        "story": {
+            "problem": requirements.get("problem_statement", ""),
+            "audience": requirements.get("target_audience", ""),
+            "local_context": requirements.get("local_context", {}),
+            "solution": pitch.get("solution", ""),
+            "tagline": pitch.get("tagline", ""),
+            "call_to_action": pitch.get("call_to_action", ""),
+        },
+        "product": {
+            "features": requirements.get("core_features", []),
+            "personas": requirements.get("primary_personas", []),
+            "workflows": requirements.get("workflow_map", []),
+            "business_rules": requirements.get("business_rules", []),
+            "localization": requirements.get("localization_requirements", {}),
+            "acceptance_criteria": requirements.get("acceptance_criteria", []),
+            "success_metrics": requirements.get("success_metrics", []),
+            "tech_stack": architecture.get("tech_stack", {}),
+            "api_routes": architecture.get("api_routes", []),
+            "ui_screens": architecture.get("ui_screens", []),
+            "validation_plan": architecture.get("validation_plan", []),
+        },
+        "delivery": {
+            "code_file_count": artifacts.get("artifact_counts", {}).get("code_files", 0),
+            "app_name": artifacts.get("detected_app", {}).get("name", ""),
+            "download_url": artifacts.get("download_url", ""),
+            "validation_status": validation.get("status", "not_run"),
+            "quality_score": quality.get("score"),
+            "quality_grade": quality.get("grade", "not_run"),
+            "validation_checks": [
+                {
+                    "name": check.get("name"),
+                    "returncode": check.get("returncode"),
+                    "duration_seconds": check.get("duration_seconds"),
+                }
+                for check in validation.get("checks", [])
+            ],
+        },
+        "pitch": pitch,
+    }
+
+
+def evaluate_generated_app(run_id: str) -> dict[str, Any]:
+    state = load_run_from_disk(run_id)
+    if not state:
+        raise FileNotFoundError(f"Run not found: {run_id}")
+
+    code_files = read_code_files(run_id)
+    requirements = state.get("requirements", {})
+    architecture = state.get("architecture", {})
+    validation = read_validation_report(run_id) or {}
+
+    package_json = _parse_package_json(code_files)
+    file_paths = sorted(code_files.keys())
+    corpus = _code_corpus(code_files)
+
+    checks = [
+        _score_project_completeness(file_paths, package_json, corpus),
+        _score_dynamic_workflows(corpus),
+        _score_requirement_coverage(requirements, architecture, corpus),
+        _score_localization(requirements, architecture, file_paths, corpus),
+        _score_runnable_quality(package_json, validation, corpus),
+        _score_demo_polish(file_paths, corpus),
+    ]
+
+    score = min(100, sum(check["score"] for check in checks))
+    report = {
+        "run_id": run_id,
+        "score": score,
+        "grade": quality_grade(score),
+        "status": _quality_status(score),
+        "minimum_score": QUALITY_MIN_SCORE,
+        "target_score": QUALITY_TARGET_SCORE,
+        "updated_at": utc_now(),
+        "checks": checks,
+        "strengths": [item for check in checks for item in check["passed"]],
+        "revision_instructions": _revision_instructions(checks),
+    }
+    write_json(run_id, "quality_report.json", report)
+    return report
+
+
+def read_quality_report(run_id: str) -> dict[str, Any] | None:
+    report = _read_json(OUTPUTS_DIR / run_id / "quality_report.json")
+    return report if isinstance(report, dict) else None
+
+
+def quality_grade(score: int) -> str:
+    if score >= 90:
+        return "10/10"
+    if score >= 82:
+        return "8.5/10"
+    if score >= 70:
+        return "demo_ready"
+    if score >= 50:
+        return "needs_work"
+    return "weak"
+
+
+def _quality_status(score: int) -> str:
+    if score >= QUALITY_TARGET_SCORE:
+        return "target_met"
+    if score >= QUALITY_MIN_SCORE:
+        return "accepted"
+    return "needs_revision"
+
+
+def _parse_package_json(code_files: dict[str, str]) -> dict[str, Any]:
+    try:
+        return json.loads(code_files.get("package.json", "{}"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _code_corpus(code_files: dict[str, str]) -> str:
+    searchable_extensions = {
+        ".css",
+        ".html",
+        ".js",
+        ".jsx",
+        ".json",
+        ".md",
+        ".mjs",
+        ".sql",
+        ".ts",
+        ".tsx",
+    }
+    chunks = []
+    for path, content in code_files.items():
+        if Path(path).suffix.lower() in searchable_extensions:
+            chunks.append(f"\n--- {path} ---\n{content[:12000]}")
+    return "\n".join(chunks).lower()
+
+
+def _score_project_completeness(file_paths: list[str], package_json: dict[str, Any], corpus: str) -> dict[str, Any]:
+    passed = []
+    missing = []
+    score = 0
+
+    if package_json:
+        score += 3
+        passed.append("Includes package.json")
+    else:
+        missing.append("Add package.json with runnable scripts and dependencies")
+
+    scripts = package_json.get("scripts") or {}
+    for script_name in ("dev", "build"):
+        if script_name in scripts:
+            score += 2
+            passed.append(f"Includes npm script: {script_name}")
+        else:
+            missing.append(f"Add npm script: {script_name}")
+
+    if any(path.lower() == "readme.md" for path in file_paths):
+        score += 2
+        passed.append("Includes README.md")
+    else:
+        missing.append("Add README.md with setup and demo flow")
+
+    if any(path.startswith(("src/", "client/", "frontend/")) for path in file_paths):
+        score += 2
+        passed.append("Includes frontend source")
+    else:
+        missing.append("Add frontend source files")
+
+    if any(path.startswith(("server/", "api/", "backend/")) for path in file_paths) or "express" in corpus:
+        score += 2
+        passed.append("Includes backend/API implementation")
+    else:
+        missing.append("Add backend/API implementation")
+
+    if any("seed" in path.lower() or "demo" in path.lower() for path in file_paths) or "seed" in corpus:
+        score += 2
+        passed.append("Includes seed or demo data")
+    else:
+        missing.append("Add realistic seed/demo data")
+
+    return _quality_check("Project completeness", 15, min(score, 15), passed, missing)
+
+
+def _score_dynamic_workflows(corpus: str) -> dict[str, Any]:
+    signals = {
+        "CRUD create/update/delete flows": ("post(", "put(", "patch(", "delete(", "create", "update", "delete"),
+        "API/data fetching": ("fetch(", "axios", "query", "api."),
+        "Forms and validation": ("form", "textfield", "input", "required", "validate", "zod"),
+        "Filtering or search": ("filter(", "search", "query", "sort("),
+        "Dashboard metrics": ("dashboard", "metric", "total", "count", "forecast", "summary"),
+        "Client state management": ("usestate", "zustand", "reducer", "context", "store"),
+        "Loading and error states": ("loading", "error", "empty"),
+    }
+    return _score_signals("Dynamic workflows", 20, corpus, signals)
+
+
+def _score_requirement_coverage(requirements: dict[str, Any], architecture: dict[str, Any], corpus: str) -> dict[str, Any]:
+    terms = []
+    terms.extend(_important_terms(requirements.get("core_features", [])))
+    terms.extend(_important_terms(requirements.get("business_rules", [])))
+    terms.extend(_important_terms([screen.get("name", "") for screen in architecture.get("ui_screens", []) if isinstance(screen, dict)]))
+    terms.extend(_important_terms([route.get("path", "") for route in architecture.get("api_routes", []) if isinstance(route, dict)]))
+    terms = sorted(set(terms))[:25]
+
+    if not terms:
+        return _quality_check(
+            "Requirement coverage",
+            20,
+            8,
+            ["No rich requirements were available, so coverage was partially credited"],
+            ["Generate richer Analyst and Architect context for stronger coverage scoring"],
+        )
+
+    matched = [term for term in terms if term in corpus]
+    missing_terms = [term for term in terms if term not in corpus][:8]
+    score = round(20 * (len(matched) / len(terms)))
+    missing = [f"Cover requirement term in UI/API/code: {term}" for term in missing_terms]
+    return _quality_check("Requirement coverage", 20, score, [f"Covers: {term}" for term in matched[:10]], missing)
+
+
+def _score_localization(requirements: dict[str, Any], architecture: dict[str, Any], file_paths: list[str], corpus: str) -> dict[str, Any]:
+    language_need = requirements.get("localization_requirements") or architecture.get("localization_plan") or {}
+    required = bool(language_need)
+    signals = {
+        "Language/locale files": ("locale", "i18n", "translations", "language"),
+        "Locale switcher": ("setlocale", "switch language", "language", "locale"),
+        "Formatted dates/numbers": ("intl.", "tolocaledatestring", "tolocalestring", "currency"),
+        "Non-English/local copy support": ("kn", "hi", "ta", "te", "mr", "ml", "bn", "gu", "pa"),
+    }
+    check = _score_signals("Localization readiness", 15, corpus + "\n".join(file_paths).lower(), signals)
+    if not required and check["score"] < 6:
+        check["score"] = 6
+        check["passed"].append("No explicit localization requirement was generated")
+    return check
+
+
+def _score_runnable_quality(package_json: dict[str, Any], validation: dict[str, Any], corpus: str) -> dict[str, Any]:
+    passed = []
+    missing = []
+    score = 0
+    scripts = package_json.get("scripts") or {}
+
+    for script_name, points in (("check", 3), ("test", 3), ("build", 3)):
+        if script_name in scripts:
+            score += points
+            passed.append(f"Includes {script_name} script")
+        else:
+            missing.append(f"Add npm script: {script_name}")
+
+    if validation.get("status") == "passed":
+        score += 7
+        passed.append("Validation report passed")
+    elif validation:
+        missing.append("Fix failing validation report")
+    else:
+        missing.append("Run SWARM validation after preview install")
+
+    if "readme" in corpus and ("npm install" in corpus or "npm run" in corpus):
+        score += 2
+        passed.append("README explains local run commands")
+    else:
+        missing.append("Document local run commands in README")
+
+    if ".env" in corpus or "environment" in corpus or "port" in corpus:
+        score += 2
+        passed.append("Documents environment/runtime configuration")
+    else:
+        missing.append("Document ports/env variables")
+
+    return _quality_check("Runnable quality", 20, min(score, 20), passed, missing)
+
+
+def _score_demo_polish(file_paths: list[str], corpus: str) -> dict[str, Any]:
+    signals = {
+        "Realistic demo data": ("seed", "demo", "sample", "mock"),
+        "Daily-use dashboard": ("dashboard", "today", "upcoming", "overdue", "summary"),
+        "Empty states": ("empty", "no records", "no data"),
+        "Responsive layout": ("responsive", "breakpoint", "grid", "@media", "md:"),
+        "README demo flow": ("demo flow", "demo", "walkthrough"),
+    }
+    check = _score_signals("Demo polish", 10, corpus + "\n".join(file_paths).lower(), signals)
+    check["score"] = min(check["score"], 10)
+    return check
+
+
+def _score_signals(name: str, max_score: int, corpus: str, signals: dict[str, tuple[str, ...]]) -> dict[str, Any]:
+    score_per_signal = max_score / len(signals)
+    score = 0.0
+    passed = []
+    missing = []
+    for label, keywords in signals.items():
+        if any(keyword in corpus for keyword in keywords):
+            score += score_per_signal
+            passed.append(label)
+        else:
+            missing.append(label)
+    return _quality_check(name, max_score, round(score), passed, [f"Add {item.lower()}" for item in missing])
+
+
+def _quality_check(name: str, max_score: int, score: int, passed: list[str], missing: list[str]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "score": max(0, min(score, max_score)),
+        "max_score": max_score,
+        "passed": passed,
+        "missing": missing,
+    }
+
+
+def _important_terms(items: Any) -> list[str]:
+    if not isinstance(items, list):
+        return []
+
+    ignored = {
+        "and",
+        "app",
+        "for",
+        "from",
+        "into",
+        "local",
+        "management",
+        "system",
+        "that",
+        "the",
+        "their",
+        "with",
+    }
+    terms = []
+    for item in items:
+        text = item if isinstance(item, str) else json.dumps(item)
+        for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{3,}", text.lower()):
+            if term not in ignored:
+                terms.append(term)
+    return terms
+
+
+def _revision_instructions(checks: list[dict[str, Any]]) -> list[str]:
+    instructions = []
+    for check in checks:
+        for item in check["missing"][:4]:
+            instructions.append(f"{check['name']}: {item}")
+    return instructions[:12]
+
+
+def create_code_zip(run_id: str) -> Path:
+    root = OUTPUTS_DIR / run_id / "code_files"
+    if not root.exists():
+        raise FileNotFoundError(f"No generated code files found for run {run_id}")
+
+    zip_path = output_dir(run_id) / "generated_app.zip"
     if zip_path.exists():
         zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file_path in sorted(path for path in app_dir.rglob("*") if path.is_file()):
-            if _skip_zip_path(file_path):
-                continue
-            archive.write(file_path, file_path.relative_to(app_dir).as_posix())
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in root.rglob("*"):
+            if path.is_file() and not _has_excluded_part(path.relative_to(root)):
+                archive.write(path, path.relative_to(root).as_posix())
     return zip_path
 
 
-def validate_generated_app(
-    run_id: str,
-    root: str | Path | None = None,
-    timeout_seconds: int = 180,
-) -> dict[str, Any]:
-    """Run generated app validation commands and persist their results."""
-    run_dir = get_run_output_dir(run_id, root, create=False)
-    app_dir = run_dir / GENERATED_APP_DIR
-    if not app_dir.exists():
-        result = {
+def materialize_generated_app(run_id: str) -> Path:
+    files = read_code_files(run_id)
+    if not files:
+        raise FileNotFoundError(f"No generated code files found for run {run_id}")
+
+    root = GENERATED_APPS_DIR / run_id
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    for relative_path, content in files.items():
+        target = _safe_output_path(root, relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return root
+
+
+def validate_generated_app(run_id: str, timeout_seconds: int = 180) -> dict[str, Any]:
+    root = GENERATED_APPS_DIR / run_id
+    if not root.exists():
+        root = materialize_generated_app(run_id)
+
+    package_json_path = root / "package.json"
+    if not package_json_path.exists():
+        report = {
             "run_id": run_id,
             "status": "failed",
-            "app_dir": str(app_dir),
-            "commands": [],
-            "error": "Generated app directory does not exist.",
+            "updated_at": utc_now(),
+            "checks": [
+                {
+                    "name": "package.json",
+                    "command": "read package.json",
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Generated app does not include package.json",
+                    "duration_seconds": 0,
+                }
+            ],
         }
-        write_json(run_dir / VALIDATION_FILE, result)
-        return result
+        write_json(run_id, "validation_report.json", report)
+        return report
 
-    commands = [
-        ["npm", "install"],
-        ["npm", "run", "check"],
-        ["npm", "run", "test"],
-        ["npm", "run", "build"],
-    ]
-    results = [_run_command(command, app_dir, timeout_seconds) for command in commands]
-    status = "passed" if all(item["returncode"] == 0 for item in results) else "failed"
-    result = {
+    package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
+    scripts = package_json.get("scripts") or {}
+    checks: list[dict[str, Any]] = []
+
+    if not (root / "node_modules").exists():
+        checks.append(_run_command(root, "install", ["npm.cmd", "install"], timeout_seconds))
+
+    for script_name in ("check", "test", "build"):
+        if script_name in scripts:
+            checks.append(_run_command(root, script_name, ["npm.cmd", "run", script_name], timeout_seconds))
+
+    status = "passed" if checks and all(check["returncode"] == 0 for check in checks) else "failed"
+    report = {
         "run_id": run_id,
         "status": status,
-        "app_dir": str(app_dir),
-        "commands": results,
+        "updated_at": utc_now(),
+        "checks": checks,
     }
-    write_json(run_dir / VALIDATION_FILE, result)
-    return result
+    write_json(run_id, "validation_report.json", report)
+    return report
 
 
-def score_generated_app_quality(
-    run_id: str,
-    state: dict[str, Any] | None = None,
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Score generated app quality using deterministic rubric checks."""
-    run_dir = get_run_output_dir(run_id, root, create=False)
-    app_dir = run_dir / GENERATED_APP_DIR
-    requirements = read_json(run_dir / "requirements.json", default={})
-    architecture = read_json(run_dir / "architecture.json", default={})
-    pitch_deck = read_json(run_dir / "pitch_deck.json", default={})
-    validation = read_json(run_dir / VALIDATION_FILE, default={})
-    generated_files = _list_relative_files(app_dir) if app_dir.exists() else []
-
-    scores = {
-        "project_completeness": _score_project_completeness(generated_files),
-        "dynamic_workflows": _score_dynamic_workflows(app_dir),
-        "requirement_coverage": _score_requirement_coverage(requirements, architecture, pitch_deck),
-        "localization_readiness": _score_localization_readiness(app_dir, requirements),
-        "runnable_quality": 20 if validation.get("status") == "passed" else 8,
-        "demo_polish": _score_demo_polish(app_dir, pitch_deck),
-    }
-    total = sum(scores.values())
-    result = {
-        "run_id": run_id,
-        "score": total,
-        "target": 90,
-        "passed": total >= 90,
-        "scores": scores,
-        "validation_status": validation.get("status"),
-        "generated_file_count": len(generated_files),
-        "status": state.get("status") if state else None,
-    }
-    write_json(run_dir / QUALITY_FILE, result)
-    return result
+def read_validation_report(run_id: str) -> dict[str, Any] | None:
+    report = _read_json(OUTPUTS_DIR / run_id / "validation_report.json")
+    return report if isinstance(report, dict) else None
 
 
-def prepare_preview_app(
-    run_id: str,
-    generated_files: dict[str, str] | None = None,
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Ensure the generated app exists for preview."""
-    app_dir = get_generated_app_dir(run_id, root)
-    if not app_dir.exists() and generated_files:
-        app_dir = materialize_generated_app(run_id, generated_files, root)
-
-    result = {
-        "run_id": run_id,
-        "status": "prepared" if app_dir.exists() else "missing",
-        "app_dir": str(app_dir),
-        "package_json": str(app_dir / "package.json"),
-        "package_json_exists": (app_dir / "package.json").exists(),
-    }
-    _write_preview_status(run_id, result, root)
-    return result
-
-
-def install_preview_dependencies(
-    run_id: str,
-    root: str | Path | None = None,
-    timeout_seconds: int = 180,
-) -> dict[str, Any]:
-    """Install generated app dependencies for preview."""
-    app_dir = get_generated_app_dir(run_id, root)
-    if not app_dir.exists():
-        return _write_preview_status(
-            run_id,
-            {"run_id": run_id, "status": "missing", "error": "Generated app directory does not exist."},
-            root,
-        )
-
-    command_result = _run_command(["npm", "install"], app_dir, timeout_seconds)
-    status = "installed" if command_result["returncode"] == 0 else "install_failed"
-    result = {
-        "run_id": run_id,
-        "status": status,
-        "app_dir": str(app_dir),
-        "install": command_result,
-    }
-    return _write_preview_status(run_id, result, root)
-
-
-def start_preview(
-    run_id: str,
-    root: str | Path | None = None,
-    api_port: int = PREVIEW_API_PORT,
-    frontend_port: int = PREVIEW_FRONTEND_PORT,
-) -> dict[str, Any]:
-    """Start generated Express API and Vite frontend preview processes."""
-    app_dir = get_generated_app_dir(run_id, root)
-    if not app_dir.exists():
-        return _write_preview_status(
-            run_id,
-            {"run_id": run_id, "status": "missing", "error": "Generated app directory does not exist."},
-            root,
-        )
-
-    stop_preview(run_id, root)
-    run_dir = get_run_output_dir(run_id, root, create=False)
-    log_dir = run_dir / "preview-logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    api_process = _start_preview_process(
-        ["npm", "run", "server"],
-        app_dir,
-        log_dir / "api.log",
-        {"PORT": str(api_port)},
-    )
-    frontend_process = _start_preview_process(
-        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", str(frontend_port)],
-        app_dir,
-        log_dir / "frontend.log",
-        {"VITE_API_BASE": f"http://127.0.0.1:{api_port}"},
-    )
-
-    PREVIEW_PROCESSES[run_id] = {"api": api_process, "frontend": frontend_process}
-    time.sleep(1)
-    return get_preview_status(run_id, root)
-
-
-def launch_preview(
-    run_id: str,
-    generated_files: dict[str, str] | None = None,
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Prepare, install, and start generated app preview."""
-    prepared = prepare_preview_app(run_id, generated_files, root)
-    if prepared["status"] != "prepared":
-        return prepared
-
-    installed = install_preview_dependencies(run_id, root)
-    if installed["status"] != "installed":
-        return installed
-
-    return start_preview(run_id, root)
-
-
-def stop_preview(run_id: str, root: str | Path | None = None) -> dict[str, Any]:
-    """Stop preview processes for a run."""
-    processes = PREVIEW_PROCESSES.pop(run_id, {})
-    stopped: dict[str, Any] = {}
-    for name, process in processes.items():
-        stopped[name] = _stop_process(process)
-
-    status = get_preview_status(run_id, root)
-    result = {
-        **status,
-        "status": "stopped",
-        "stopped": stopped,
-    }
-    return _write_preview_status(run_id, result, root)
-
-
-def get_preview_status(run_id: str, root: str | Path | None = None) -> dict[str, Any]:
-    """Return current preview status and URLs."""
-    app_dir = get_generated_app_dir(run_id, root)
-    processes = PREVIEW_PROCESSES.get(run_id, {})
-    api = _process_status(processes.get("api"))
-    frontend = _process_status(processes.get("frontend"))
-    running = api.get("running", False) and frontend.get("running", False)
-    result = {
-        "run_id": run_id,
-        "status": "running" if running else "stopped",
-        "app_dir": str(app_dir),
-        "prepared": app_dir.exists(),
-        "installed": (app_dir / "node_modules").exists(),
-        "frontend_url": f"http://127.0.0.1:{PREVIEW_FRONTEND_PORT}",
-        "api_url": f"http://127.0.0.1:{PREVIEW_API_PORT}",
-        "api_health_url": f"http://127.0.0.1:{PREVIEW_API_PORT}/api/health",
-        "api_metrics_url": f"http://127.0.0.1:{PREVIEW_API_PORT}/api/metrics",
-        "processes": {
-            "api": api,
-            "frontend": frontend,
-        },
-    }
-    return _write_preview_status(run_id, result, root)
-
-
-def _run_command(command: list[str], cwd: Path, timeout_seconds: int) -> dict[str, Any]:
-    started = time.monotonic()
-    executable = shutil.which(command[0]) or command[0]
-    resolved_command = [executable, *command[1:]]
+def _safe_output_path(root: Path, relative_path: str) -> Path:
+    target = (root / relative_path).resolve()
+    root_resolved = root.resolve()
     try:
-        completed = subprocess.run(
-            resolved_command,
-            cwd=cwd,
+        target.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ValueError(f"Unsafe output path: {relative_path}")
+    return target
+
+
+def _has_excluded_part(path: Path) -> bool:
+    return any(part in GENERATED_FILE_EXCLUDES for part in path.parts)
+
+
+def _run_command(root: Path, name: str, command: list[str], timeout_seconds: int) -> dict[str, Any]:
+    started_at = datetime.now(UTC)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            shell=False,
             check=False,
         )
         return {
-            "command": command,
-            "returncode": completed.returncode,
-            "duration_seconds": round(time.monotonic() - started, 3),
-            "stdout": completed.stdout[-4000:],
-            "stderr": completed.stderr[-4000:],
+            "name": name,
+            "command": " ".join(command),
+            "returncode": result.returncode,
+            "stdout": clean_process_output(result.stdout)[-5000:],
+            "stderr": clean_process_output(result.stderr)[-5000:],
+            "duration_seconds": round((datetime.now(UTC) - started_at).total_seconds(), 2),
         }
     except subprocess.TimeoutExpired as exc:
         return {
-            "command": command,
+            "name": name,
+            "command": " ".join(command),
             "returncode": 124,
-            "duration_seconds": round(time.monotonic() - started, 3),
-            "stdout": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
-            "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
-            "error": f"Command timed out after {timeout_seconds} seconds.",
+            "stdout": clean_process_output(exc.stdout or "")[-5000:] if isinstance(exc.stdout, str) else "",
+            "stderr": f"Command timed out after {timeout_seconds} seconds",
+            "duration_seconds": round((datetime.now(UTC) - started_at).total_seconds(), 2),
         }
 
 
-def _start_preview_process(
-    command: list[str],
-    cwd: Path,
-    log_path: Path,
-    env_overrides: dict[str, str],
-) -> subprocess.Popen[str]:
-    executable = shutil.which(command[0]) or command[0]
-    resolved_command = [executable, *command[1:]]
-    env = {**os.environ, **env_overrides}
-    log_file = log_path.open("a", encoding="utf-8")
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    return subprocess.Popen(
-        resolved_command,
-        cwd=cwd,
-        env=env,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        shell=False,
-        creationflags=creationflags,
-    )
+def clean_process_output(text: str) -> str:
+    ansi_escape = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    cleaned = ansi_escape.sub("", text or "")
+    return cleaned.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
 
 
-def _stop_process(process: subprocess.Popen[str]) -> dict[str, Any]:
-    if process.poll() is not None:
-        return {"pid": process.pid, "returncode": process.returncode, "was_running": False}
-
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-    else:
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-
-    return {"pid": process.pid, "returncode": process.poll(), "was_running": True}
+def _read_json(path: Path) -> Any:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _process_status(process: subprocess.Popen[str] | None) -> dict[str, Any]:
-    if process is None:
-        return {"running": False, "pid": None, "returncode": None}
-    return {
-        "running": process.poll() is None,
-        "pid": process.pid,
-        "returncode": process.poll(),
-    }
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
 
 
-def _write_preview_status(
-    run_id: str,
-    status: dict[str, Any],
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    run_dir = get_run_output_dir(run_id, root)
-    write_json(run_dir / PREVIEW_FILE, status)
-    return status
-
-
-def _artifact_file(path: Path) -> dict[str, Any]:
-    return {
-        "path": str(path),
-        "exists": path.exists(),
-        "size_bytes": path.stat().st_size if path.exists() else 0,
-    }
-
-
-def _list_relative_files(root: Path) -> list[str]:
-    return [
-        path.relative_to(root).as_posix()
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-        and "node_modules" not in path.relative_to(root).parts
-        and "dist" not in path.relative_to(root).parts
-    ]
-
-
-def _skip_zip_path(path: Path) -> bool:
-    return "node_modules" in path.parts or "dist" in path.parts
-
-
-def _read_app_file(app_dir: Path, relative_path: str) -> str:
-    return read_text(app_dir / relative_path, default="") or ""
-
-
-def _score_project_completeness(generated_files: list[str]) -> int:
-    required = {
-        "package.json",
-        "index.html",
-        "vite.config.js",
-        "README.md",
-        "server/index.js",
-        "server/dataStore.js",
-        "server/app.test.js",
-        "server/seed-data.json",
-        "src/main.jsx",
-        "src/api.js",
-        "src/i18n.js",
-        "src/App.jsx",
-        "src/styles.css",
-    }
-    present = required.intersection(generated_files)
-    return round(20 * (len(present) / len(required)))
-
-
-def _score_dynamic_workflows(app_dir: Path) -> int:
-    combined = "\n".join(
-        [
-            _read_app_file(app_dir, "server/index.js"),
-            _read_app_file(app_dir, "server/dataStore.js"),
-            _read_app_file(app_dir, "src/App.jsx"),
-        ]
-    )
-    markers = ["createRecord", "updateRecord", "deleteRecord", "search", "status", "metrics"]
-    return min(20, 4 * sum(1 for marker in markers if marker in combined))
-
-
-def _score_requirement_coverage(
-    requirements: dict[str, Any],
-    architecture: dict[str, Any],
-    pitch_deck: dict[str, Any],
-) -> int:
-    checks = [
-        bool(requirements.get("core_workflows")),
-        bool(requirements.get("features")),
-        bool(requirements.get("dashboard_metrics")),
-        bool(architecture.get("api_routes")),
-        bool(architecture.get("database_schema")),
-        bool(pitch_deck.get("key_features")),
-    ]
-    return min(15, round(15 * (sum(checks) / len(checks))))
-
-
-def _score_localization_readiness(app_dir: Path, requirements: dict[str, Any]) -> int:
-    i18n = _read_app_file(app_dir, "src/i18n.js")
-    localization = requirements.get("localization", {})
-    checks = [
-        "labels" in i18n,
-        "recordLabel" in i18n,
-        "queueLabel" in i18n,
-        bool(localization.get("language_ready")),
-    ]
-    return min(10, round(10 * (sum(checks) / len(checks))))
-
-
-def _score_demo_polish(app_dir: Path, pitch_deck: dict[str, Any]) -> int:
-    app = _read_app_file(app_dir, "src/App.jsx")
-    styles = _read_app_file(app_dir, "src/styles.css")
-    seed = read_json(app_dir / "server" / "seed-data.json", default=[])
-    checks = [
-        "metrics-grid" in app,
-        "empty" in app.lower() or "No records" in app,
-        "error" in app.lower(),
-        bool(seed),
-        bool(pitch_deck.get("demo_flow")),
-        "@media" in styles,
-    ]
-    return min(15, round(15 * (sum(checks) / len(checks))))
-
-
-def _safe_child_path(parent: Path, child: str | Path) -> Path:
-    """Resolve child below parent and reject traversal outside parent."""
-    parent_resolved = parent.resolve()
-    target = (parent / child).resolve()
-
-    try:
-        target.relative_to(parent_resolved)
-    except ValueError as exc:
-        raise ValueError(f"Path escapes allowed directory: {child}") from exc
-
-    return target
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()

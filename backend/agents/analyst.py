@@ -1,170 +1,145 @@
-"""Analyst agent for requirements generation."""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
-
-from backend.agents.llm import GroqJsonError, MissingGroqApiKeyError, complete_json
+from backend.agents.llm import call_groq_json
 from backend.state import ProjectState
-from backend.utils import get_run_output_dir, read_text, write_json
+from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
-PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "analyst_prompt.txt"
+MAX_TOKENS = 1800
 
 
 def run_analyst(state: ProjectState) -> ProjectState:
-    """Generate requirements and persist them to requirements.json."""
-    prompt = state["prompt"]
-    requirements = generate_requirements(prompt)
+    set_agent_status(state, "analyst", "running")
+    try:
+        state["requirements"] = call_groq_json(
+            agent_name="analyst",
+            system_prompt=load_prompt("analyst_prompt.txt"),
+            user_content=state["idea"],
+            temperature=0.25,
+            max_tokens=MAX_TOKENS,
+        )
+        complete_agent(state, "analyst")
+    except Exception as exc:
+        state.setdefault("errors", []).append(f"Analyst used fallback after LLM error: {exc}")
+        state["requirements"] = fallback_requirements(state.get("idea", ""))
+        complete_agent(state, "analyst")
 
-    run_dir = Path(state.get("output_dir") or get_run_output_dir(state["run_id"]))
-    write_json(run_dir / "requirements.json", requirements)
-
-    state["output_dir"] = str(run_dir)
-    state["requirements"] = requirements
+    write_json(state["run_id"], "requirements.json", state["requirements"])
     return state
 
 
-def generate_requirements(prompt: str) -> dict[str, Any]:
-    """Generate requirements with Groq, falling back to deterministic output."""
-    analyst_prompt = format_analyst_prompt(prompt)
-    try:
-        requirements = complete_json(analyst_prompt)
-        return normalize_requirements(requirements, prompt, source="groq")
-    except (MissingGroqApiKeyError, GroqJsonError) as exc:
-        fallback = deterministic_requirements(prompt)
-        fallback["metadata"]["source"] = "deterministic_fallback"
-        fallback["metadata"]["fallback_reason"] = exc.__class__.__name__
-        return fallback
-
-
-def format_analyst_prompt(prompt: str) -> str:
-    """Format the Analyst prompt for the LLM."""
-    template = read_text(PROMPT_PATH)
-    if not template:
-        return f"Analyze this local business app request and return requirements JSON:\n{prompt}"
-    return template.replace("{{USER_PROMPT}}", prompt.strip())
-
-
-def normalize_requirements(
-    requirements: dict[str, Any],
-    prompt: str,
-    *,
-    source: str,
-) -> dict[str, Any]:
-    """Ensure the Analyst output has the fields downstream agents expect."""
-    fallback = deterministic_requirements(prompt)
-    normalized = {
-        "business_problem": requirements.get("business_problem") or fallback["business_problem"],
-        "target_users": _string_list(requirements.get("target_users"), fallback["target_users"]),
-        "core_workflows": _string_list(requirements.get("core_workflows"), fallback["core_workflows"]),
-        "data_entities": _string_list(requirements.get("data_entities"), fallback["data_entities"]),
-        "features": _string_list(requirements.get("features"), fallback["features"]),
-        "dashboard_metrics": _string_list(
-            requirements.get("dashboard_metrics"),
-            fallback["dashboard_metrics"],
-        ),
-        "localization": requirements.get("localization") or fallback["localization"],
-        "constraints": _string_list(requirements.get("constraints"), fallback["constraints"]),
-        "acceptance_criteria": _string_list(
-            requirements.get("acceptance_criteria"),
-            fallback["acceptance_criteria"],
-        ),
-        "metadata": {
-            "source": source,
-            "original_prompt": prompt,
-        },
-    }
-    return normalized
-
-
-def deterministic_requirements(prompt: str) -> dict[str, Any]:
-    """Create stable baseline requirements without an LLM."""
-    business_type = _infer_business_type(prompt)
-    record_label = _record_label_for_business(business_type)
-    queue_label = "appointments" if business_type in {"salon", "clinic", "fitness studio"} else "orders"
-
+def fallback_requirements(idea: str) -> dict:
+    business_type = infer_business_type(idea)
     return {
-        "business_problem": prompt.strip(),
-        "target_users": ["business owner", "staff"],
-        "core_workflows": [
-            f"capture and update {record_label}",
-            f"manage {queue_label}",
-            "search and filter active records",
-            "review daily operational summary",
+        "problem_statement": f"{business_type.title()} teams need a simple way to manage daily work, customer follow-ups, due dates, and revenue without spreadsheets or missed commitments.",
+        "target_audience": f"Local {business_type} owners, staff, and solo operators who need a practical app in their own language.",
+        "local_context": {
+            "geography": "India-first local business context",
+            "business_type": business_type,
+            "operating_reality": "Small teams handle bookings, orders, customer calls, payments, and reminders manually on phones or notebooks.",
+            "language_needs": "English plus Indian local-language support for staff comfort.",
+            "device_constraints": "Must work on laptop and mobile-width browser screens with low setup complexity.",
+        },
+        "primary_personas": [
+            {
+                "name": "Owner",
+                "role": "Business decision maker",
+                "goals": ["Track all work in one place", "Avoid missed deadlines", "See revenue and workload"],
+                "pains": ["Manual follow-ups", "No dashboard", "Lost customer details"],
+                "permissions": ["create", "edit", "delete", "view metrics"],
+            },
+            {
+                "name": "Staff",
+                "role": "Daily operator",
+                "goals": ["Update statuses", "Find customer records", "Know what is due today"],
+                "pains": ["Unclear priorities", "Language friction", "Repeated phone checks"],
+                "permissions": ["create", "edit", "view"],
+            },
+        ],
+        "core_features": [
+            "customer and work item management",
+            "create, edit, delete, search, and filter records",
+            "due date and priority tracking",
+            "dashboard metrics for open, upcoming, completed, and revenue",
+            "follow-up notes and contact details",
+            "local JSON persistence for offline-friendly demo use",
+            "English, Hindi, and Kannada language switcher",
+            "realistic seed data and reset demo flow",
+        ],
+        "user_stories": [
+            "As a local owner, I want to create work records so that no customer request is lost.",
+            "As staff, I want to filter by status so that I know what needs action.",
+            "As an owner, I want dashboard metrics so that I can see workload and revenue quickly.",
+            "As staff, I want local-language labels so that the app is comfortable to use.",
+            "As an owner, I want demo data so that I can understand the app immediately.",
+            "As staff, I want validation so that incomplete records are not saved.",
+        ],
+        "workflow_map": [
+            {
+                "name": "Create work record",
+                "trigger": "New customer request",
+                "actor": "Owner or staff",
+                "steps": ["Enter customer", "Add work title", "Set due date", "Choose status", "Save"],
+                "expected_outcome": "Record appears in dashboard and list.",
+            },
+            {
+                "name": "Daily follow-up",
+                "trigger": "Start of day",
+                "actor": "Staff",
+                "steps": ["Open dashboard", "Filter open/upcoming records", "Call customer", "Update notes/status"],
+                "expected_outcome": "Team knows what is done and what remains.",
+            },
         ],
         "data_entities": [
-            record_label,
-            "customers",
-            "services",
-            "staff notes",
+            {
+                "name": "work_item",
+                "purpose": "Tracks each customer request/order/booking",
+                "important_fields": ["customerName", "phone", "title", "status", "priority", "dueDate", "amount", "notes"],
+                "relationships": ["belongs to customer/contact"],
+            }
         ],
-        "features": [
-            "dashboard metrics",
-            f"CRUD management for {record_label}",
-            "status tracking",
-            "search and filtering",
-            "seed data for demo use",
+        "business_rules": [
+            "customer name is required",
+            "title is required",
+            "due date is required",
+            "status must be one of new, confirmed, in_progress, completed",
+            "amount must be numeric",
         ],
-        "dashboard_metrics": [
-            f"total {record_label}",
-            f"open {queue_label}",
-            "completed today",
-            "follow ups due",
+        "automation_requirements": [
+            {
+                "name": "upcoming work visibility",
+                "trigger": "dashboard load",
+                "action": "calculate upcoming non-completed records",
+                "fallback": "show all open records",
+            }
         ],
-        "localization": {
-            "language_ready": True,
-            "notes": "Use simple labels that can be translated for local staff.",
+        "localization_requirements": {
+            "default_language": "English",
+            "supported_languages": ["English", "Hindi", "Kannada"],
+            "copy_style": "simple operational language",
+            "local_terms": ["customer", "due date", "amount", "status"],
+            "date_time_currency_format": "India date formatting and INR currency",
         },
-        "constraints": [
-            "generated app must run locally",
-            "use React frontend",
-            "use Express backend",
-            "store data in local JSON files",
-            "builder must be deterministic and internal",
+        "mvp_scope": {
+            "included": ["dashboard", "CRUD records", "filters", "local-language labels", "seed data", "local API"],
+            "excluded": ["payments integration", "SMS gateway", "multi-user auth", "cloud deployment"],
+        },
+        "success_metrics": ["open work items", "upcoming due items", "completed items", "total revenue"],
+        "seed_data": [
+            "New customer request due next week",
+            "Confirmed booking with reminder due tomorrow",
+            "In-progress work item requiring follow-up",
+            "Completed delivery awaiting feedback",
         ],
         "acceptance_criteria": [
-            "owner can create, update, search, and filter records",
-            "dashboard displays current operational metrics",
-            "app includes seed data and runnable scripts",
-            "generated code avoids external app-builder dependencies",
+            "User can create, edit, delete, search, and filter records.",
+            "Dashboard metrics update from saved records.",
+            "App supports English, Hindi, and Kannada UI labels.",
+            "Generated project passes check, test, and build scripts.",
         ],
-        "metadata": {
-            "source": "deterministic",
-            "original_prompt": prompt,
-            "business_type": business_type,
-        },
     }
 
 
-def _infer_business_type(prompt: str) -> str:
-    normalized = prompt.lower()
-    if any(term in normalized for term in ("salon", "saloon", "beauty", "spa", "hair", "barber", "makeup")):
-        return "salon"
-    if "bakery" in normalized or "cake" in normalized:
-        return "bakery"
-    if any(term in normalized for term in ("clinic", "doctor", "patient", "medical")):
-        return "clinic"
-    if any(term in normalized for term in ("fitness", "gym", "studio", "trainer")):
-        return "fitness studio"
-    if any(term in normalized for term in ("tuition", "class", "student", "coaching")):
-        return "tuition center"
+def infer_business_type(idea: str) -> str:
+    lowered = idea.lower()
+    for keyword in ("bakery", "fitness", "photography", "clinic", "salon", "restaurant", "tuition", "coach"):
+        if keyword in lowered:
+            return keyword
     return "local business"
-
-
-def _record_label_for_business(business_type: str) -> str:
-    labels = {
-        "bakery": "orders",
-        "salon": "appointments",
-        "clinic": "patient visits",
-        "fitness studio": "memberships",
-        "tuition center": "student enrollments",
-    }
-    return labels.get(business_type, "business records")
-
-
-def _string_list(value: Any, fallback: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        return fallback
-    cleaned = [str(item).strip() for item in value if str(item).strip()]
-    return cleaned or fallback

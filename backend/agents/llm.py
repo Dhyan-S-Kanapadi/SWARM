@@ -1,179 +1,261 @@
-"""Groq JSON completion helper."""
-
-from __future__ import annotations
-
 import os
+import re
 import time
-from dataclasses import dataclass
 from typing import Any
 
-from groq import APIStatusError, Groq, RateLimitError
+from groq import Groq
 
-from backend.utils import parse_json_text
+from backend.utils import parse_json_response
 
-DEFAULT_GROQ_MODELS = (
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "gemma2-9b-it",
-)
-
-
-class GroqJsonError(RuntimeError):
-    """Raised when a Groq JSON completion cannot be completed."""
-
-
-class MissingGroqApiKeyError(GroqJsonError):
-    """Raised when a live Groq call is requested without an API key."""
+DEFAULT_MODEL = "llama-3.1-8b-instant"
+DEFAULT_FALLBACK_MODELS = "llama-3.1-8b-instant"
+DEFAULT_TIMEOUT_SECONDS = 45
+DEFAULT_RATE_LIMIT_RETRY_SECONDS = 20
+DEFAULT_REQUEST_TOKEN_BUDGET = 5600
+AGENT_MIN_TOKENS = {
+    "analyst": 2200,
+    "architect": 2400,
+    "pitcher": 900,
+}
 
 
-class GroqRequestTooLargeError(GroqJsonError):
-    """Raised when Groq rejects a request as too large."""
+class LLMUnavailableError(RuntimeError):
+    pass
 
 
-@dataclass(frozen=True)
-class GroqJsonConfig:
-    """Runtime configuration for Groq JSON completions."""
-
-    api_key: str | None
-    models: tuple[str, ...]
-    temperature: float
-    max_tokens: int
-    timeout_seconds: float
-    rate_limit_retries: int
-    rate_limit_delay_seconds: float
-
-    @classmethod
-    def from_env(cls) -> "GroqJsonConfig":
-        return cls(
-            api_key=os.getenv("GROQ_API_KEY") or None,
-            models=_models_from_env(),
-            temperature=float(os.getenv("GROQ_TEMPERATURE", "0")),
-            max_tokens=int(os.getenv("GROQ_MAX_TOKENS", "2048")),
-            timeout_seconds=float(os.getenv("GROQ_TIMEOUT_SECONDS", "30")),
-            rate_limit_retries=int(os.getenv("GROQ_RATE_LIMIT_RETRIES", "2")),
-            rate_limit_delay_seconds=float(os.getenv("GROQ_RATE_LIMIT_DELAY_SECONDS", "2")),
-        )
-
-
-def complete_json(
-    prompt: str,
+def call_groq_json(
     *,
-    system_prompt: str = "Return only valid JSON. Do not include Markdown fences or commentary.",
-    config: GroqJsonConfig | None = None,
+    agent_name: str,
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+    temperature: float,
 ) -> dict[str, Any]:
-    """Request a JSON object from Groq and parse it into a dictionary."""
-    parsed = complete_json_value(prompt, system_prompt=system_prompt, config=config)
-    if not isinstance(parsed, dict):
-        raise GroqJsonError("Expected Groq response to parse to a JSON object.")
-    return parsed
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise LLMUnavailableError("GROQ_API_KEY is not set")
 
+    model = os.getenv("GROQ_MODEL", DEFAULT_MODEL)
+    token_cap = _agent_token_cap(agent_name, max_tokens)
+    client = Groq(api_key=api_key, timeout=float(os.getenv("GROQ_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)))
 
-def complete_json_value(
-    prompt: str,
-    *,
-    system_prompt: str = "Return only valid JSON. Do not include Markdown fences or commentary.",
-    config: GroqJsonConfig | None = None,
-) -> Any:
-    """Request JSON from Groq and parse any valid JSON value."""
-    resolved_config = config or GroqJsonConfig.from_env()
-    if not resolved_config.api_key:
-        raise MissingGroqApiKeyError("GROQ_API_KEY is required for Groq completions.")
-
-    client = Groq(
-        api_key=resolved_config.api_key,
-        timeout=resolved_config.timeout_seconds,
-        max_retries=0,
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    content = _create_completion_with_model_fallback(
+        client=client,
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=token_cap,
     )
 
-    last_error: Exception | None = None
-    for model in resolved_config.models:
-        try:
-            content = _chat_completion(client, model, system_prompt, prompt, resolved_config)
-            return _parse_or_repair(client, model, system_prompt, content, resolved_config)
-        except GroqRequestTooLargeError:
-            raise
-        except APIStatusError as exc:
-            last_error = exc
-            if exc.status_code in {401, 403}:
-                raise GroqJsonError(f"Groq authentication failed with status {exc.status_code}.") from exc
-            if exc.status_code == 413:
-                raise GroqRequestTooLargeError("Groq rejected the request as too large.") from exc
-        except (RateLimitError, GroqJsonError) as exc:
-            last_error = exc
-
-    raise GroqJsonError("Groq JSON completion failed for all configured models.") from last_error
-
-
-def _chat_completion(
-    client: Groq,
-    model: str,
-    system_prompt: str,
-    prompt: str,
-    config: GroqJsonConfig,
-) -> str:
-    for attempt in range(config.rate_limit_retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=config.temperature,
-                max_completion_tokens=config.max_tokens,
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            if not content:
-                raise GroqJsonError("Groq returned an empty response.")
-            return content
-        except RateLimitError:
-            if attempt >= config.rate_limit_retries:
-                raise
-            time.sleep(config.rate_limit_delay_seconds)
-        except APIStatusError as exc:
-            if exc.status_code == 413:
-                raise GroqRequestTooLargeError("Groq rejected the request as too large.") from exc
-            raise
-
-    raise GroqJsonError("Groq completion failed after rate limit retries.")
-
-
-def _parse_or_repair(
-    client: Groq,
-    model: str,
-    system_prompt: str,
-    content: str,
-    config: GroqJsonConfig,
-) -> Any:
     try:
-        return parse_json_text(content)
-    except ValueError as exc:
-        repair_prompt = (
-            "Repair this response into valid JSON only. Preserve the intended data and "
-            "return no Markdown or commentary.\n\n"
-            f"{content}"
+        return parse_json_response(content)
+    except Exception as parse_exc:
+        repair_token_cap = _repair_token_cap(agent_name, token_cap)
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"{system_prompt}\n\n"
+                    "Your previous response was invalid or truncated. Return a complete JSON object only. "
+                    "Use compact JSON with no markdown. Keep array items concise, but include every required top-level key."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{user_content}\n\n"
+                    "Return the full corrected JSON now. Do not continue the old text. "
+                    f"Parser error from previous attempt: {parse_exc}"
+                ),
+            },
+        ]
+        repaired = _create_completion_with_model_fallback(
+            client=client,
+            model=model,
+            messages=repair_messages,
+            temperature=0.1,
+            max_tokens=repair_token_cap,
         )
-        repaired = _chat_completion(client, model, system_prompt, repair_prompt, config)
+        return parse_json_response(repaired)
+
+
+def _agent_token_cap(agent_name: str, fallback: int) -> int:
+    key = f"GROQ_{agent_name.upper()}_MAX_TOKENS"
+    minimum = AGENT_MIN_TOKENS.get(agent_name.lower(), 256)
+    try:
+        return max(minimum, int(os.getenv(key, fallback)))
+    except ValueError:
+        return max(minimum, fallback)
+
+
+def _repair_token_cap(agent_name: str, token_cap: int) -> int:
+    repair_key = f"GROQ_{agent_name.upper()}_REPAIR_MAX_TOKENS"
+    default_cap = min(6000, max(token_cap + 1200, round(token_cap * 1.4)))
+    try:
+        return max(token_cap, int(os.getenv(repair_key, default_cap)))
+    except ValueError:
+        return default_cap
+
+
+def _create_completion_with_model_fallback(
+    *,
+    client: Groq,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    last_error: Exception | None = None
+    for candidate_model in _model_candidates(model):
         try:
-            return parse_json_text(repaired)
-        except ValueError as repair_exc:
-            raise GroqJsonError("Groq response could not be parsed as JSON.") from repair_exc
-        except Exception as repair_exc:
-            raise GroqJsonError("Groq JSON repair failed.") from repair_exc
+            return _create_completion_with_short_retry(
+                client=client,
+                model=candidate_model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            last_error = exc
+            if not _should_try_next_model(str(exc)):
+                raise
+    if last_error:
+        raise last_error
+    raise LLMUnavailableError("No Groq models configured")
+
+
+def _model_candidates(primary_model: str) -> list[str]:
+    configured = os.getenv("GROQ_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS)
+    candidates = [primary_model]
+    candidates.extend(model.strip() for model in configured.split(",") if model.strip())
+    deduped = []
+    for model in candidates:
+        if model not in deduped:
+            deduped.append(model)
+    return deduped
+
+
+def _should_try_next_model(message: str) -> bool:
+    lowered = message.lower()
+    if "invalid api key" in lowered or "authentication" in lowered:
+        return False
+    return any(
+        signal in lowered
+        for signal in (
+            "rate_limit",
+            "rate limit",
+            "tokens per day",
+            "request too large",
+            "model",
+            "timeout",
+            "temporarily unavailable",
+        )
+    )
+
+
+def _create_completion_with_short_retry(
+    *,
+    client: Groq,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    fitted_max_tokens = _fit_max_tokens(messages, max_tokens)
+    try:
+        return _create_completion(
+            client=client,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=fitted_max_tokens,
+        )
     except Exception as exc:
-        raise GroqJsonError("Groq response could not be parsed as JSON.") from exc
+        reduced_max_tokens = _reduced_max_tokens_after_413(str(exc), fitted_max_tokens)
+        if reduced_max_tokens:
+            return _create_completion(
+                client=client,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=reduced_max_tokens,
+            )
+        wait_seconds = _retry_after_seconds(str(exc))
+        retry_limit = int(os.getenv("GROQ_RATE_LIMIT_RETRY_SECONDS", DEFAULT_RATE_LIMIT_RETRY_SECONDS))
+        if wait_seconds is None or wait_seconds > retry_limit:
+            raise
+        time.sleep(max(1, wait_seconds))
+        return _create_completion(
+            client=client,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=fitted_max_tokens,
+        )
 
 
-def _models_from_env() -> tuple[str, ...]:
-    configured_models = os.getenv("GROQ_MODELS")
-    if configured_models:
-        models = tuple(model.strip() for model in configured_models.split(",") if model.strip())
-        if models:
-            return models
+def _create_completion(
+    *,
+    client: Groq,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content or "{}"
 
-    single_model = os.getenv("GROQ_MODEL")
-    if single_model:
-        return (single_model, *tuple(model for model in DEFAULT_GROQ_MODELS if model != single_model))
 
-    return DEFAULT_GROQ_MODELS
+def _retry_after_seconds(message: str) -> int | None:
+    match = re.search(r"try again in (?:(\d+)m)?\s*([0-9.]+)s", message, re.IGNORECASE)
+    if not match:
+        return None
+    minutes = int(match.group(1) or 0)
+    seconds = float(match.group(2))
+    return round(minutes * 60 + seconds)
+
+
+def _fit_max_tokens(messages: list[dict[str, str]], requested_max_tokens: int) -> int:
+    budget = _request_token_budget()
+    input_estimate = _estimate_message_tokens(messages)
+    available = budget - input_estimate
+    if available <= 0:
+        return max(512, min(requested_max_tokens, 900))
+    return max(512, min(requested_max_tokens, available))
+
+
+def _request_token_budget() -> int:
+    try:
+        return max(1500, int(os.getenv("GROQ_REQUEST_TOKEN_BUDGET", DEFAULT_REQUEST_TOKEN_BUDGET)))
+    except ValueError:
+        return DEFAULT_REQUEST_TOKEN_BUDGET
+
+
+def _estimate_message_tokens(messages: list[dict[str, str]]) -> int:
+    chars = sum(len(message.get("content", "")) for message in messages)
+    overhead = 12 * len(messages)
+    return round(chars / 4) + overhead
+
+
+def _reduced_max_tokens_after_413(message: str, current_max_tokens: int) -> int | None:
+    lowered = message.lower()
+    if "request too large" not in lowered and "requested" not in lowered:
+        return None
+    limit_match = re.search(r"limit\s+(\d+)", message, re.IGNORECASE)
+    requested_match = re.search(r"requested\s+(\d+)", message, re.IGNORECASE)
+    if not limit_match or not requested_match:
+        return max(512, current_max_tokens - 800) if current_max_tokens > 1200 else None
+    limit = int(limit_match.group(1))
+    requested = int(requested_match.group(1))
+    overage = max(0, requested - limit)
+    reduced = current_max_tokens - overage - 250
+    return reduced if reduced >= 512 and reduced < current_max_tokens else None

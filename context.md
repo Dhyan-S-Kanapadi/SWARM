@@ -1,221 +1,196 @@
-# SWARM.AI Context
+# SWARM.AI Project Context
 
-## Purpose
+## Project
 
-SWARM.AI is a local-business app factory. It accepts a plain-language prompt and produces a runnable React + Express management app, supporting artifacts, validation results, and a pitch summary.
+SWARM.AI is an AI app generator for local businesses. The goal is: a local shop owner types a plain-language problem, and SWARM generates a runnable business management app with frontend, backend, local database, seed data, dashboard, validation, and preview links.
 
-The project is built to demonstrate a multi-agent software generation workflow with a deterministic builder. Groq can improve planning and pitch artifacts, but the system still runs without a Groq key through local fallback logic.
+## Current Direction
 
-## Current Architecture
+We originally tried to integrate Trae MCP, but later the hackathon requirement changed and Trae was no longer mandatory. So the project was upgraded to work independently without Trae.
+
+Current flow:
 
 ```text
-frontend/ React + Vite control panel
-backend/  FastAPI API + LangGraph workflow + agents + utilities
-outputs/  Per-run artifacts and generated apps
+User prompt
+  -> Analyst agent
+  -> Architect agent
+  -> SWARM Builder agent
+  -> Pitcher agent
+  -> Generated runnable app
 ```
 
-The backend API is created in `backend/main.py`. It keeps active run state in an in-memory `RUN_STORE`, starts workflows through FastAPI background tasks, and exposes endpoints for status, artifacts, download, validation, quality scoring, and generated app preview.
+## Current Tech
 
-The workflow is defined in `backend/graph.py` with a linear LangGraph `StateGraph`.
+Main SWARM app:
 
-## Agent Workflow
+- Backend: FastAPI / Python
+- Frontend: React + Vite
+- LLM: Groq API for Analyst, Architect, Pitcher
+- Builder: internal deterministic code generator
+- Output apps: React + Express + local JSON persistence
 
-The current LangGraph order is:
+Generated apps include:
 
-1. Analyst
-2. Architect
-3. Builder
-4. Pitcher
-
-Agent responsibilities:
-
-- Analyst: creates `requirements.json` from the user prompt.
-- Architect: creates `architecture.json` from the prompt and requirements.
-- Builder: creates and materializes `generated-app/`.
-- Pitcher: creates `pitch_deck.json` from the prompt and generated artifacts.
-
-Every agent updates shared `ProjectState` status metadata. The workflow writes `summary.json` when complete.
-
-## Groq Behavior
-
-`backend/agents/llm.py` provides JSON-only Groq completions.
-
-Environment variables are read from the backend process environment:
-
-- `GROQ_API_KEY`
-- `GROQ_MODEL`
-- `GROQ_MODELS`
-- `GROQ_TEMPERATURE`
-- `GROQ_MAX_TOKENS`
-- `GROQ_TIMEOUT_SECONDS`
-- `GROQ_RATE_LIMIT_RETRIES`
-- `GROQ_RATE_LIMIT_DELAY_SECONDS`
-
-The default model list is:
-
-- `llama-3.3-70b-versatile`
-- `llama-3.1-8b-instant`
-- `gemma2-9b-it`
-
-Analyst, Architect, and Pitcher use Groq when available. If the key is missing, authentication fails, rate limits exhaust, or JSON parsing fails, those agents produce deterministic fallback artifacts. The Builder is always deterministic and does not call Groq.
-
-## Builder Behavior
-
-The Builder is implemented in `backend/agents/builder.py`. It detects the business domain from the prompt, builds a domain context, creates seed records, and writes a complete generated app file map.
-
-Generated app stack:
-
-- React + Vite frontend
+- React frontend
 - Express backend
-- Local JSON persistence
-- Node test runner
-
-Generated app capabilities:
-
+- Local JSON database
+- CRUD APIs
 - Dashboard metrics
-- CRUD record workflows
-- Search and status filtering
-- Status advancement
 - Seed data
-- API health route
-- Metrics route
-- Local validation scripts
+- Tests
+- README
+- Preview launch support
 
-Supported domains:
+## Important Pivot
 
-- Bakery
-- Salon, including "saloon"
-- Clinic
-- Fitness studio
-- Tuition center
-- Generic local business fallback
+The Builder agent does not use Trae anymore. It generates the app internally.
 
-## Generated App Files
+Groq is used for:
 
-The generated app currently contains:
+- Analyst: product requirements
+- Architect: app architecture
+- Pitcher: pitch summary
+
+Builder is currently deterministic/template-driven for reliability. It uses the prompt + requirements + architecture to generate runnable app files.
+
+## Key Problems Fixed
+
+1. Groq 429 rate limits
+   Reduced token usage and added fallback behavior.
+
+2. Groq malformed JSON
+   Added JSON repair retry before fallback.
+
+3. Groq 413 request too large
+   Added request-size fitting and compact Architect input.
+
+4. Builder always seeming like bakery output
+   Fixed domain detection so user prompt is the source of truth. Added `saloon` as a salon keyword.
+
+5. Stale preview showing old app
+   Identified that old generated app servers on ports `3001/6200` can keep running. Cleared stale preview processes and relaunched latest generated app.
+
+## Current Builder Behavior
+
+The builder now detects domains like:
+
+- bakery
+- salon / saloon / beauty / barber / makeup
+- clinic
+- fitness studio
+- tuition center
+- generic local business
+
+For salon/saloon prompts, it now generates:
+
+- salon business type
+- appointment queue
+- hair/beauty service records
+- staff schedules
+- payment status
+- reminders/follow-ups
+- revenue metrics
+- English/Hindi/Kannada labels
+
+Verified example prompt:
 
 ```text
-package.json
-index.html
-vite.config.js
-README.md
-server/index.js
-server/dataStore.js
-server/app.test.js
-server/seed-data.json
-src/main.jsx
-src/api.js
-src/i18n.js
-src/App.jsx
-src/styles.css
+Build a saloon management app with customer profiles, staff schedules, hair and beauty service bookings, payment status, reminders, daily appointment queue, revenue dashboard, and English/Hindi/Kannada labels.
 ```
 
-The generated `package.json` includes:
+Generated:
+
+- app name: `build-saloon-management`
+- business type: `salon`
+- queue: `appointment queue`
+- validation: passed
+- quality: `99/100`
+
+## Current Live Local Links
+
+If servers are running:
 
 ```text
-npm run dev
-npm run server
-npm run check
-npm run test
-npm run build
+SWARM frontend:
+http://127.0.0.1:5173
+
+SWARM backend health:
+http://127.0.0.1:8000/health
+
+Generated app preview:
+http://127.0.0.1:6200
+
+Generated app API:
+http://127.0.0.1:3001
 ```
 
-## Run Commands
+## How To Run Locally
 
-Backend:
+From project root:
 
 ```powershell
-pip install fastapi uvicorn langgraph groq pydantic
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 Frontend:
 
 ```powershell
-npm --prefix frontend install
-npm --prefix frontend run dev
+cd frontend
+$env:VITE_API_BASE_URL='http://127.0.0.1:8000'
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Default URLs:
+## Environment
 
-- SWARM frontend: `http://127.0.0.1:5173`
-- SWARM backend: `http://127.0.0.1:8000`
-- Generated app API preview: `http://127.0.0.1:3001`
-- Generated app frontend preview: `http://127.0.0.1:6200`
+`.env` should contain:
 
-## Preview Flow
+```env
+GROQ_API_KEY=your_groq_key
+```
 
-Preview endpoints:
+Optional config:
 
-- `POST /preview/{run_id}/prepare`
-- `POST /preview/{run_id}/install`
-- `POST /preview/{run_id}/start`
-- `POST /preview/{run_id}/stop`
-- `POST /preview/{run_id}/launch`
-- `GET /preview/{run_id}/status`
+```env
+GROQ_MODEL=llama-3.1-8b-instant
+GROQ_REQUEST_TOKEN_BUDGET=5600
+GROQ_ANALYST_MAX_TOKENS=2200
+GROQ_ARCHITECT_MAX_TOKENS=2800
+GROQ_ARCHITECT_REPAIR_MAX_TOKENS=3200
+GROQ_PITCHER_MAX_TOKENS=900
+```
 
-`launch` runs prepare, install, and start in sequence. Preview status is persisted to `outputs/<run_id>/preview.json`.
+## Latest GitHub Status
 
-## Validation And Quality
-
-Validation endpoint:
+Repo:
 
 ```text
-POST /validate/{run_id}
+https://github.com/Dhyan-S-Kanapadi/SWARM.AI
 ```
 
-Validation runs inside the generated app:
+Latest commit before this context file:
 
 ```text
-npm install
-npm run check
-npm run test
-npm run build
+b681ad6 Prioritize prompt domain in builder
 ```
 
-Validation output is saved to `validation.json`.
+GitHub was up to date before adding this file.
 
-Quality endpoint:
+## What Has Been Completed
 
-```text
-POST /quality/{run_id}
-```
+- Backend workflow works.
+- Frontend SWARM UI works.
+- Groq integration works with retries/fallbacks.
+- Internal builder creates runnable generated apps.
+- Generated app preview launch works.
+- Generated app validation works.
+- Generated app download works.
+- Domain-specific generation now works for salon/saloon.
+- Code has been pushed to GitHub.
 
-Quality scoring checks:
+## Current Limitation
 
-- Project completeness
-- Dynamic workflows
-- Requirement coverage
-- Localization readiness
-- Runnable quality
-- Demo polish
+The builder is reliable but still template-driven. It creates strong local-business management apps, but it is not yet a fully free-form coding agent like Bolt/Lovable. That was intentional so the hackathon demo remains stable and generated apps pass validation.
 
-The current target score is `90`, and output is saved to `quality.json`.
+## Best Current Pitch
 
-## API Surface
-
-Primary backend endpoints:
-
-- `GET /health`
-- `POST /run`
-- `GET /status/{run_id}`
-- `GET /output/{run_id}`
-- `GET /runs`
-- `GET /artifacts/{run_id}`
-- `GET /download/{run_id}`
-- `POST /validate/{run_id}`
-- `POST /quality/{run_id}`
-- Preview endpoints listed above
-
-## Limitations
-
-- Run state is process-local and not restored from disk into `RUN_STORE`.
-- Generated apps use local JSON files rather than a production database.
-- Preview ports are fixed in `backend/utils.py`.
-- The generated app is template-driven and supports a bounded set of local-business workflows.
-- Groq planning is useful but optional; deterministic fallbacks are the reliability path.
-- No authentication, hosted deployment, background queue persistence, or multi-tenant storage is implemented yet.
-
-## Pitch
-
-SWARM.AI gives a small business owner a fast path from workflow problem to working demo. The project combines agent-based analysis and architecture with deterministic code generation, making the output repeatable enough to validate and practical enough to preview. The current product story is: describe a local workflow, watch the agents produce artifacts, inspect the generated code, launch the app, run checks, score quality, and download the result.
+SWARM.AI is a local-business app factory. A bakery, salon, clinic, tuition center, or small shop owner types their workflow problem, and SWARM generates a working management app with dashboard, CRUD, local-language UX, seed data, tests, and live preview links.

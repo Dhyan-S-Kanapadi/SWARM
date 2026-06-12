@@ -1,210 +1,379 @@
-"""FastAPI application entry point."""
+import os
+import subprocess
+from threading import Lock
+from uuid import uuid4
 
-from __future__ import annotations
-
-from copy import deepcopy
-from typing import Any
-
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from backend.graph import run_workflow
-from backend.state import ProjectState, create_project_state, utc_now_iso
+from backend.graph import workflow
+from backend.state import ProjectState, initial_agent_statuses
 from backend.utils import (
-    collect_artifact_summary,
-    get_generated_app_dir,
-    get_preview_status,
-    get_run_output_dir,
-    install_preview_dependencies,
-    launch_preview,
-    load_run_summary,
+    OUTPUTS_DIR,
+    GENERATED_APPS_DIR,
+    build_artifact_summary,
+    build_demo_summary,
+    create_code_zip,
+    evaluate_generated_app,
+    list_run_summaries,
+    load_run_from_disk,
     materialize_generated_app,
-    prepare_preview_app,
-    score_generated_app_quality,
-    start_preview,
-    stop_preview,
     validate_generated_app,
-    zip_generated_app,
+    utc_now,
+    write_run_summary,
 )
 
-RUN_STORE: dict[str, ProjectState] = {}
+load_dotenv()
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title="SWARM.AI")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+runs: dict[str, ProjectState] = {}
+runs_lock = Lock()
+preview_processes: dict[str, dict] = {}
 
 
 class RunRequest(BaseModel):
-    """Request body for starting a SWARM run."""
-
-    prompt: str = Field(..., min_length=1)
+    idea: str = Field(..., min_length=1)
 
 
-def create_app() -> FastAPI:
-    """Create and configure the SWARM API."""
-    api = FastAPI(title="SWARM.AI API", version="0.1.0")
+def execute_workflow(run_id: str) -> None:
+    state = runs[run_id]
+    try:
+        final_state = workflow.invoke(state)
+        builder_status = final_state.get("agent_statuses", {}).get("builder")
+        if builder_status == "waiting_for_trae":
+            final_state["current_agent"] = "builder"
+            final_state["done"] = False
+        else:
+            final_state["current_agent"] = "done"
+            final_state["done"] = True
+        final_state["updated_at"] = utc_now()
+        runs[run_id] = final_state
+    except Exception as exc:
+        state.setdefault("errors", []).append(f"Workflow failed: {exc}")
+        state["done"] = True
+        state["current_agent"] = "done"
+        state["updated_at"] = utc_now()
+    finally:
+        write_run_summary(runs[run_id])
 
-    api.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+
+@app.post("/run")
+def run_project(payload: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
+    run_id = str(uuid4())
+    now = utc_now()
+    state: ProjectState = {
+        "idea": payload.idea,
+        "requirements": {},
+        "architecture": {},
+        "builder_prompt": "",
+        "code_files": {},
+        "pitch_deck": {},
+        "current_agent": "queued",
+        "agent_statuses": initial_agent_statuses(),
+        "errors": [],
+        "run_id": run_id,
+        "done": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with runs_lock:
+        runs[run_id] = state
+    write_run_summary(state)
+    background_tasks.add_task(execute_workflow, run_id)
+    return {"run_id": run_id}
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "service": "SWARM.AI backend",
+        "groq_configured": bool(os.getenv("GROQ_API_KEY")),
+        "builder_mode": "internal",
+        "outputs_dir": str(OUTPUTS_DIR),
+    }
+
+
+@app.get("/runs")
+def list_runs() -> dict:
+    memory_summaries = []
+    with runs_lock:
+        for state in runs.values():
+            memory_summaries.append(
+                {
+                    "run_id": state.get("run_id"),
+                    "idea": state.get("idea", ""),
+                    "current_agent": state.get("current_agent", "unknown"),
+                    "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
+                    "errors": state.get("errors", []),
+                    "done": state.get("done", False),
+                    "created_at": state.get("created_at"),
+                    "updated_at": state.get("updated_at"),
+                }
+            )
+    summaries_by_id = {item["run_id"]: item for item in list_run_summaries()}
+    for item in memory_summaries:
+        summaries_by_id[item["run_id"]] = item
+    return {"runs": list(summaries_by_id.values())}
+
+
+@app.get("/status/{run_id}")
+def get_status(run_id: str) -> dict:
+    state = _get_run(run_id)
+    return {
+        "run_id": run_id,
+        "current_agent": state.get("current_agent", "unknown"),
+        "agent_statuses": state.get("agent_statuses", initial_agent_statuses()),
+        "errors": state.get("errors", []),
+        "done": state.get("done", False),
+        "created_at": state.get("created_at"),
+        "updated_at": state.get("updated_at"),
+    }
+
+
+@app.get("/output/{run_id}")
+def get_output(run_id: str) -> dict:
+    state = _get_run(run_id)
+    return {
+        "run_id": run_id,
+        "idea": state.get("idea", ""),
+        "requirements": state.get("requirements", {}),
+        "architecture": state.get("architecture", {}),
+        "builder_prompt": state.get("builder_prompt", ""),
+        "code_files": state.get("code_files", {}),
+        "pitch_deck": state.get("pitch_deck", {}),
+        "errors": state.get("errors", []),
+        "done": state.get("done", False),
+    }
+
+
+@app.get("/artifacts/{run_id}")
+def get_artifacts(run_id: str) -> dict:
+    _get_run(run_id)
+    summary = build_artifact_summary(run_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Artifacts not found")
+    return summary
+
+
+@app.get("/demo/{run_id}")
+def get_demo_summary(run_id: str) -> dict:
+    _get_run(run_id)
+    summary = build_demo_summary(run_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Demo summary not found")
+    return summary
+
+
+@app.get("/download/{run_id}")
+def download_generated_app(run_id: str) -> FileResponse:
+    _get_run(run_id)
+    try:
+        zip_path = create_code_zip(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"swarm-ai-{run_id}-generated-app.zip",
     )
 
-    @api.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
 
-    @api.post("/run", status_code=202)
-    def start_run(
-        request: RunRequest,
-        background_tasks: BackgroundTasks,
-    ) -> dict[str, Any]:
-        state = create_project_state(request.prompt.strip())
-        run_id = state["run_id"]
-        run_dir = get_run_output_dir(run_id)
+@app.post("/preview/{run_id}/prepare")
+def prepare_preview(run_id: str) -> dict:
+    _get_run(run_id)
+    try:
+        app_path = materialize_generated_app(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _preview_status_payload(run_id, app_path)
 
-        state["output_dir"] = str(run_dir)
-        state["status"] = "queued"
-        RUN_STORE[run_id] = state
 
-        background_tasks.add_task(run_background_workflow, run_id)
+@app.post("/preview/{run_id}/install")
+def install_preview_dependencies(run_id: str) -> dict:
+    app_path = _ensure_preview_app(run_id)
+    _install_preview_dependencies(run_id, app_path)
+    return _preview_status_payload(run_id, app_path)
 
-        return {
-            "run_id": run_id,
-            "status": state["status"],
-            "status_url": f"/status/{run_id}",
-            "output_url": f"/output/{run_id}",
+
+@app.post("/preview/{run_id}/launch")
+def launch_preview(run_id: str) -> dict:
+    app_path = _ensure_preview_app(run_id)
+    if not (app_path / "node_modules").exists():
+        _install_preview_dependencies(run_id, app_path)
+    return _start_preview_processes(run_id, app_path)
+
+
+def _install_preview_dependencies(run_id: str, app_path) -> None:
+    package_json = app_path / "package.json"
+    if not package_json.exists():
+        raise HTTPException(status_code=400, detail="Generated app has no package.json")
+
+    result = subprocess.run(
+        ["npm.cmd", "install"],
+        cwd=app_path,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    preview_processes.setdefault(run_id, {})["last_install"] = {
+        "returncode": result.returncode,
+        "stdout": result.stdout[-4000:],
+        "stderr": result.stderr[-4000:],
+        "updated_at": utc_now(),
+    }
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=preview_processes[run_id]["last_install"])
+
+
+@app.post("/preview/{run_id}/start")
+def start_preview(run_id: str) -> dict:
+    app_path = _ensure_preview_app(run_id)
+    package_json = app_path / "package.json"
+    if not package_json.exists():
+        raise HTTPException(status_code=400, detail="Generated app has no package.json")
+    if not (app_path / "node_modules").exists():
+        raise HTTPException(status_code=409, detail="Install dependencies before starting preview")
+    return _start_preview_processes(run_id, app_path)
+
+
+def _start_preview_processes(run_id: str, app_path) -> dict:
+    record = preview_processes.setdefault(run_id, {})
+    _stop_preview_processes(record)
+
+    env = os.environ.copy()
+    env["PORT"] = "3001"
+
+    server_process = subprocess.Popen(
+        ["npm.cmd", "run", "dev:server"],
+        cwd=app_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    client_process = subprocess.Popen(
+        ["npm.cmd", "run", "dev:client", "--", "--host", "127.0.0.1", "--port", "6200"],
+        cwd=app_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    record.update(
+        {
+            "app_path": str(app_path),
+            "frontend_url": "http://127.0.0.1:6200",
+            "api_url": "http://127.0.0.1:3001",
+            "server_pid": server_process.pid,
+            "client_pid": client_process.pid,
+            "server_process": server_process,
+            "client_process": client_process,
+            "started_at": utc_now(),
         }
+    )
+    return _preview_status_payload(run_id, app_path)
 
-    @api.get("/status/{run_id}")
-    def get_status(run_id: str) -> ProjectState:
-        return _get_run_or_404(run_id)
 
-    @api.get("/output/{run_id}")
-    def get_output(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        summary = load_run_summary(run_id) or state.get("summary", {})
-        return {
-            "run_id": run_id,
-            "status": state["status"],
-            "output_dir": state.get("output_dir"),
-            "summary": summary,
-            "requirements": state.get("requirements", {}),
-            "architecture": state.get("architecture", {}),
-            "generated_files": state.get("generated_files", {}),
-            "pitch_deck": state.get("pitch_deck", {}),
-            "errors": state.get("errors", []),
-        }
+@app.post("/preview/{run_id}/stop")
+def stop_preview(run_id: str) -> dict:
+    record = preview_processes.setdefault(run_id, {})
+    _stop_preview_processes(record)
+    record["stopped_at"] = utc_now()
+    app_path = GENERATED_APPS_DIR / run_id
+    return _preview_status_payload(run_id, app_path)
 
-    @api.get("/runs")
-    def list_runs() -> dict[str, list[ProjectState]]:
-        runs = sorted(
-            RUN_STORE.values(),
-            key=lambda item: item.get("created_at", ""),
-            reverse=True,
-        )
-        return {"runs": [deepcopy(run) for run in runs]}
 
-    @api.get("/artifacts/{run_id}")
-    def get_artifacts(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
-        return collect_artifact_summary(run_id, state)
+@app.get("/preview/{run_id}/status")
+def get_preview_status(run_id: str) -> dict:
+    _get_run(run_id)
+    return _preview_status_payload(run_id, GENERATED_APPS_DIR / run_id)
 
-    @api.get("/download/{run_id}")
-    def download_generated_app(run_id: str) -> FileResponse:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
+
+@app.post("/validate/{run_id}")
+def validate_generated_app_endpoint(run_id: str) -> dict:
+    _get_run(run_id)
+    try:
+        return validate_generated_app(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/quality/{run_id}")
+def evaluate_generated_app_quality(run_id: str) -> dict:
+    _get_run(run_id)
+    try:
+        return evaluate_generated_app(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _get_run(run_id: str) -> ProjectState:
+    state = runs.get(run_id)
+    disk_state = load_run_from_disk(run_id)
+    if disk_state and (not state or _is_newer(disk_state, state)):
+        state = disk_state
+        with runs_lock:
+            runs[run_id] = state
+    if not state:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return state
+
+
+def _is_newer(candidate: ProjectState, current: ProjectState) -> bool:
+    return str(candidate.get("updated_at", "")) > str(current.get("updated_at", ""))
+
+
+def _ensure_preview_app(run_id: str):
+    _get_run(run_id)
+    app_path = GENERATED_APPS_DIR / run_id
+    if not app_path.exists():
         try:
-            zip_path = zip_generated_app(run_id)
+            app_path = materialize_generated_app(run_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return FileResponse(
-            zip_path,
-            media_type="application/zip",
-            filename=f"swarm-generated-app-{run_id}.zip",
-        )
-
-    @api.post("/validate/{run_id}")
-    def validate_run(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
-        return validate_generated_app(run_id)
-
-    @api.post("/quality/{run_id}")
-    def score_run_quality(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
-        return score_generated_app_quality(run_id, state)
-
-    @api.post("/preview/{run_id}/prepare")
-    def prepare_run_preview(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        return prepare_preview_app(run_id, state.get("generated_files", {}))
-
-    @api.post("/preview/{run_id}/install")
-    def install_run_preview(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
-        return install_preview_dependencies(run_id)
-
-    @api.post("/preview/{run_id}/start")
-    def start_run_preview(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        _ensure_generated_app_materialized(state)
-        return start_preview(run_id)
-
-    @api.post("/preview/{run_id}/stop")
-    def stop_run_preview(run_id: str) -> dict[str, Any]:
-        _get_run_or_404(run_id)
-        return stop_preview(run_id)
-
-    @api.post("/preview/{run_id}/launch")
-    def launch_run_preview(run_id: str) -> dict[str, Any]:
-        state = _get_run_or_404(run_id)
-        return launch_preview(run_id, state.get("generated_files", {}))
-
-    @api.get("/preview/{run_id}/status")
-    def get_run_preview_status(run_id: str) -> dict[str, Any]:
-        _get_run_or_404(run_id)
-        return get_preview_status(run_id)
-
-    return api
+    return app_path
 
 
-def run_background_workflow(run_id: str) -> None:
-    """Run the LangGraph workflow for a stored run."""
-    state = RUN_STORE.get(run_id)
-    if state is None:
-        return
-
-    try:
-        state["status"] = "running"
-        state["updated_at"] = utc_now_iso()
-        RUN_STORE[run_id] = run_workflow(state)
-    except Exception as exc:  # pragma: no cover - defensive background guard
-        state["status"] = "failed"
-        state["updated_at"] = utc_now_iso()
-        state.setdefault("errors", []).append(str(exc))
-
-
-def _get_run_or_404(run_id: str) -> ProjectState:
-    state = RUN_STORE.get(run_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return deepcopy(state)
+def _preview_status_payload(run_id: str, app_path) -> dict:
+    record = preview_processes.get(run_id, {})
+    server_running = _process_is_running(record.get("server_process"))
+    client_running = _process_is_running(record.get("client_process"))
+    return {
+        "run_id": run_id,
+        "app_path": str(app_path),
+        "prepared": app_path.exists(),
+        "dependencies_installed": (app_path / "node_modules").exists(),
+        "frontend_url": record.get("frontend_url", "http://127.0.0.1:6200"),
+        "api_url": record.get("api_url", "http://127.0.0.1:3001"),
+        "server_running": server_running,
+        "client_running": client_running,
+        "running": server_running or client_running,
+        "last_install": record.get("last_install"),
+        "started_at": record.get("started_at"),
+        "stopped_at": record.get("stopped_at"),
+    }
 
 
-def _ensure_generated_app_materialized(state: ProjectState) -> None:
-    run_id = state["run_id"]
-    app_dir = get_generated_app_dir(run_id)
-    if app_dir.exists():
-        return
-
-    generated_files = state.get("generated_files", {})
-    if not generated_files:
-        raise HTTPException(status_code=404, detail="Generated app not found")
-    materialize_generated_app(run_id, generated_files)
+def _process_is_running(process) -> bool:
+    return bool(process and process.poll() is None)
 
 
-app = create_app()
+def _stop_preview_processes(record: dict) -> None:
+    for key in ("server_process", "client_process"):
+        process = record.get(key)
+        if process and process.poll() is None:
+            process.terminate()

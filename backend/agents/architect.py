@@ -1,200 +1,213 @@
-"""Architect agent for app architecture generation."""
-
-from __future__ import annotations
-
 import json
-from pathlib import Path
-from typing import Any
 
-from backend.agents.llm import GroqJsonError, MissingGroqApiKeyError, complete_json
+from backend.agents.llm import call_groq_json
 from backend.state import ProjectState
-from backend.utils import get_run_output_dir, read_text, write_json
+from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
-PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "architect_prompt.txt"
+MAX_TOKENS = 2800
 
 
 def run_architect(state: ProjectState) -> ProjectState:
-    """Generate app architecture and persist it to architecture.json."""
-    requirements = state.get("requirements", {})
-    architecture = generate_architecture(state["prompt"], requirements)
+    set_agent_status(state, "architect", "running")
+    try:
+        state["architecture"] = call_groq_json(
+            agent_name="architect",
+            system_prompt=load_prompt("architect_prompt.txt"),
+            user_content=json.dumps(compact_requirements(state.get("requirements", {})), separators=(",", ":")),
+            temperature=0.25,
+            max_tokens=MAX_TOKENS,
+        )
+        complete_agent(state, "architect")
+    except Exception as exc:
+        state.setdefault("errors", []).append(f"Architect used fallback after LLM error: {exc}")
+        state["architecture"] = fallback_architecture(state.get("requirements", {}))
+        complete_agent(state, "architect")
 
-    run_dir = Path(state.get("output_dir") or get_run_output_dir(state["run_id"]))
-    write_json(run_dir / "architecture.json", architecture)
-
-    state["output_dir"] = str(run_dir)
-    state["architecture"] = architecture
+    write_json(state["run_id"], "architecture.json", state["architecture"])
     return state
 
 
-def generate_architecture(prompt: str, requirements: dict[str, Any]) -> dict[str, Any]:
-    """Generate architecture with Groq, falling back to deterministic output."""
-    architect_prompt = format_architect_prompt(prompt, requirements)
-    try:
-        architecture = complete_json(architect_prompt)
-        return normalize_architecture(architecture, prompt, requirements, source="groq")
-    except (MissingGroqApiKeyError, GroqJsonError) as exc:
-        fallback = deterministic_architecture(prompt, requirements)
-        fallback["metadata"]["source"] = "deterministic_fallback"
-        fallback["metadata"]["fallback_reason"] = exc.__class__.__name__
-        return fallback
-
-
-def format_architect_prompt(prompt: str, requirements: dict[str, Any]) -> str:
-    """Format the Architect prompt with compact requirements JSON."""
-    template = read_text(PROMPT_PATH)
-    compact_requirements = json.dumps(
-        compact_requirements_for_architect(requirements),
-        indent=2,
-        sort_keys=True,
-    )
-    if not template:
-        return (
-            "Design a generated local-business management app architecture.\n"
-            f"User prompt:\n{prompt}\n\nRequirements:\n{compact_requirements}"
-        )
-    return template.replace("{{USER_PROMPT}}", prompt.strip()).replace(
-        "{{REQUIREMENTS_JSON}}",
-        compact_requirements,
-    )
-
-
-def compact_requirements_for_architect(requirements: dict[str, Any]) -> dict[str, Any]:
-    """Keep only the requirements fields needed for architecture decisions."""
-    keys = (
-        "business_problem",
-        "target_users",
-        "core_workflows",
-        "data_entities",
-        "features",
-        "dashboard_metrics",
-        "localization",
-        "constraints",
-        "acceptance_criteria",
-        "metadata",
-    )
-    compact = {key: requirements.get(key) for key in keys if key in requirements}
-    return _truncate_nested(compact)
-
-
-def normalize_architecture(
-    architecture: dict[str, Any],
-    prompt: str,
-    requirements: dict[str, Any],
-    *,
-    source: str,
-) -> dict[str, Any]:
-    """Ensure architecture includes required downstream fields."""
-    fallback = deterministic_architecture(prompt, requirements)
-    normalized = {
-        "tech_stack": _dict_or_fallback(architecture.get("tech_stack"), fallback["tech_stack"]),
-        "api_routes": _list_or_fallback(architecture.get("api_routes"), fallback["api_routes"]),
-        "database_schema": _dict_or_fallback(
-            architecture.get("database_schema"),
-            fallback["database_schema"],
-        ),
-        "screens": _list_or_fallback(architecture.get("screens"), fallback["screens"]),
-        "workflows": _list_or_fallback(architecture.get("workflows"), fallback["workflows"]),
-        "validation": _list_or_fallback(architecture.get("validation"), fallback["validation"]),
-        "metadata": {
-            "source": source,
-            "original_prompt": prompt,
-            "requirements_source": requirements.get("metadata", {}).get("source"),
-        },
+def compact_requirements(requirements: dict) -> dict:
+    return {
+        "problem_statement": _shorten(requirements.get("problem_statement", "")),
+        "target_audience": _shorten(requirements.get("target_audience", "")),
+        "local_context": requirements.get("local_context", {}),
+        "core_features": _short_list(requirements.get("core_features", []), 8),
+        "business_rules": _short_list(requirements.get("business_rules", []), 8),
+        "automation_requirements": _short_objects(requirements.get("automation_requirements", []), 5),
+        "localization_requirements": requirements.get("localization_requirements", {}),
+        "data_entities": _short_objects(requirements.get("data_entities", []), 5),
+        "workflow_map": _short_objects(requirements.get("workflow_map", []), 5),
+        "seed_data": _short_list(requirements.get("seed_data", []), 6),
+        "acceptance_criteria": _short_list(requirements.get("acceptance_criteria", []), 6),
     }
-    return normalized
 
 
-def deterministic_architecture(prompt: str, requirements: dict[str, Any]) -> dict[str, Any]:
-    """Create a deterministic architecture from Analyst requirements."""
-    entities = _string_list(requirements.get("data_entities"), ["business records"])
-    metrics = _string_list(requirements.get("dashboard_metrics"), ["total records", "open items"])
-    workflows = _string_list(
-        requirements.get("core_workflows"),
-        ["create records", "track status", "review dashboard"],
-    )
-    primary_entity = _slug(entities[0])
+def _short_list(items, limit: int) -> list:
+    if not isinstance(items, list):
+        return []
+    return [_shorten(item) for item in items[:limit]]
 
+
+def _short_objects(items, limit: int) -> list:
+    if not isinstance(items, list):
+        return []
+    compacted = []
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            compacted.append({key: _shorten(value) for key, value in item.items()})
+        else:
+            compacted.append(_shorten(item))
+    return compacted
+
+
+def _shorten(value, limit: int = 180):
+    if isinstance(value, list):
+        return [_shorten(item, limit) for item in value[:6]]
+    if isinstance(value, dict):
+        return {key: _shorten(item, limit) for key, item in value.items()}
+    text = str(value)
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def fallback_architecture(requirements: dict) -> dict:
+    app_name = "swarm-localops"
     return {
         "tech_stack": {
-            "frontend": "React + Vite",
-            "backend": "Express",
-            "database": "local JSON file",
-            "testing": "Node test runner",
+            "frontend": "React with Vite",
+            "backend": "Node.js with Express",
+            "database": "Local JSON persistence with seed data",
+            "styling": "Plain CSS responsive dashboard",
+            "testing": "Node test runner plus vite build",
+            "local_run_strategy": "npm install, npm run dev, npm run check, npm run test, npm run build",
+        },
+        "app_shell": {
+            "app_name": app_name,
+            "navigation": ["Dashboard", "Records", "Form", "Language switcher"],
+            "primary_dashboard_widgets": ["total records", "open records", "upcoming records", "revenue"],
+            "empty_states": ["No records match filters", "Loading records", "Validation error"],
+            "responsive_requirements": "Single-column mobile layout and two-column desktop layout",
+        },
+        "database_schema": {
+            "work_items": {
+                "fields": {
+                    "id": "integer primary key",
+                    "customerName": "string required",
+                    "phone": "string",
+                    "title": "string required",
+                    "category": "string",
+                    "status": "enum new|confirmed|in_progress|completed",
+                    "priority": "enum low|medium|high",
+                    "dueDate": "date required",
+                    "amount": "number",
+                    "notes": "string",
+                    "language": "string",
+                },
+                "indexes": ["status", "dueDate", "customerName"],
+                "relationships": [],
+                "seed_records": requirements.get("seed_data", []),
+            }
         },
         "api_routes": [
-            {"method": "GET", "path": "/api/health", "purpose": "health check"},
-            {"method": "GET", "path": "/api/metrics", "purpose": "dashboard metrics"},
-            {"method": "GET", "path": f"/api/{primary_entity}", "purpose": f"list {entities[0]}"},
-            {"method": "POST", "path": f"/api/{primary_entity}", "purpose": f"create {entities[0]}"},
-            {"method": "PUT", "path": f"/api/{primary_entity}/:id", "purpose": f"update {entities[0]}"},
-            {"method": "DELETE", "path": f"/api/{primary_entity}/:id", "purpose": f"delete {entities[0]}"},
-        ],
-        "database_schema": {
-            primary_entity: {
-                "fields": [
-                    {"name": "id", "type": "string"},
-                    {"name": "name", "type": "string"},
-                    {"name": "status", "type": "string"},
-                    {"name": "service", "type": "string"},
-                    {"name": "notes", "type": "string"},
-                    {"name": "createdAt", "type": "datetime"},
-                    {"name": "updatedAt", "type": "datetime"},
-                ],
-                "storage": f"server/data/{primary_entity}.json",
+            {
+                "method": "GET",
+                "path": "/api/health",
+                "description": "Health check",
+                "request_body": None,
+                "response_shape": {"ok": True},
+                "validation_rules": [],
             },
-            "metadata": {
-                "fields": [
-                    {"name": "lastSeededAt", "type": "datetime"},
-                    {"name": "businessProblem", "type": "string"},
-                ],
-                "storage": "server/data/metadata.json",
+            {
+                "method": "GET",
+                "path": "/api/items",
+                "description": "List, search, and filter records",
+                "request_body": None,
+                "response_shape": [{"id": "number", "customerName": "string"}],
+                "validation_rules": ["status query is optional", "search query is optional"],
             },
-        },
-        "screens": [
-            {"name": "Dashboard", "purpose": f"show metrics: {', '.join(metrics[:4])}"},
-            {"name": "Records", "purpose": f"CRUD, search, and filter {entities[0]}"},
-            {"name": "Details", "purpose": "edit status, service details, and staff notes"},
+            {
+                "method": "POST",
+                "path": "/api/items",
+                "description": "Create record",
+                "request_body": {"customerName": "string", "title": "string", "dueDate": "date", "status": "string"},
+                "response_shape": {"id": "number"},
+                "validation_rules": ["customerName required", "title required", "dueDate required", "valid status"],
+            },
+            {
+                "method": "PUT",
+                "path": "/api/items/:id",
+                "description": "Update record",
+                "request_body": {"status": "string"},
+                "response_shape": {"id": "number"},
+                "validation_rules": ["record must exist", "valid status"],
+            },
+            {
+                "method": "DELETE",
+                "path": "/api/items/:id",
+                "description": "Delete record",
+                "request_body": None,
+                "response_shape": None,
+                "validation_rules": ["id must exist or no-op"],
+            },
+            {
+                "method": "GET",
+                "path": "/api/metrics",
+                "description": "Dashboard metrics",
+                "request_body": None,
+                "response_shape": {"total": "number", "open": "number", "upcoming": "number", "revenue": "number"},
+                "validation_rules": [],
+            },
         ],
-        "workflows": workflows,
-        "validation": [
-            "npm run test",
-            "npm run build",
-            "manual API health check",
+        "ui_screens": [
+            {
+                "name": "Dashboard",
+                "route": "/",
+                "purpose": "Show metrics and operational status",
+                "data_needed": ["/api/metrics", "/api/items"],
+                "primary_actions": ["filter", "search", "reset demo data"],
+                "states": ["loading", "error", "empty", "ready"],
+            },
+            {
+                "name": "Record form",
+                "route": "/",
+                "purpose": "Create and edit work records",
+                "data_needed": ["/api/items"],
+                "primary_actions": ["create", "edit", "delete"],
+                "states": ["validation error", "saving", "ready"],
+            },
         ],
-        "metadata": {
-            "source": "deterministic",
-            "original_prompt": prompt,
-            "requirements_source": requirements.get("metadata", {}).get("source"),
+        "project_modules": [
+            {"name": "server", "responsibility": "Express API and persistence", "files": ["server/index.js", "server/dataStore.js"]},
+            {"name": "frontend", "responsibility": "React dashboard and CRUD UI", "files": ["src/App.jsx", "src/api.js", "src/i18n.js"]},
+            {"name": "tests", "responsibility": "Data workflow test", "files": ["server/app.test.js"]},
+        ],
+        "state_management": {
+            "frontend_state": ["items", "metrics", "form", "filters", "locale", "loading", "error"],
+            "server_state": "local JSON file resettable from seed-data.json",
+            "forms": "controlled React form with required fields",
+            "filters": "search and status query params",
+            "optimistic_updates": "reload after mutation for reliability",
         },
+        "localization_plan": {
+            "language_files": ["src/i18n.js"],
+            "default_locale": "en",
+            "locale_switching": "dropdown in topbar",
+            "translated_surfaces": ["labels", "buttons", "empty states", "navigation"],
+            "formatting_rules": "Intl DateTimeFormat and NumberFormat for India",
+        },
+        "automation_jobs": [
+            {
+                "name": "metric calculation",
+                "schedule_or_trigger": "on metrics API request",
+                "logic": "aggregate total/open/completed/upcoming/revenue from records",
+                "user_visible_result": "dashboard widgets update",
+            }
+        ],
+        "validation_plan": [
+            {"scenario": "create record", "steps": ["fill form", "save"], "expected_result": "record appears in list"},
+            {"scenario": "filter records", "steps": ["select status"], "expected_result": "only matching records show"},
+            {"scenario": "language switch", "steps": ["choose Hindi or Kannada"], "expected_result": "labels translate"},
+        ],
+        "folder_structure": "package.json\nindex.html\nserver/\n  index.js\n  dataStore.js\n  seed-data.json\n  app.test.js\nsrc/\n  main.jsx\n  App.jsx\n  api.js\n  i18n.js\n  styles.css\nREADME.md",
+        "build_constraints": ["no paid APIs", "local-first", "must pass npm run check/test/build", "responsive UI"],
     }
-
-
-def _truncate_nested(value: Any, limit: int = 1200) -> Any:
-    if isinstance(value, str):
-        return value[:limit]
-    if isinstance(value, list):
-        return [_truncate_nested(item, limit) for item in value[:12]]
-    if isinstance(value, dict):
-        return {str(key): _truncate_nested(item, limit) for key, item in list(value.items())[:20]}
-    return value
-
-
-def _string_list(value: Any, fallback: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        return fallback
-    cleaned = [str(item).strip() for item in value if str(item).strip()]
-    return cleaned or fallback
-
-
-def _list_or_fallback(value: Any, fallback: list[Any]) -> list[Any]:
-    return value if isinstance(value, list) and value else fallback
-
-
-def _dict_or_fallback(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    return value if isinstance(value, dict) and value else fallback
-
-
-def _slug(value: str) -> str:
-    slug = "".join(char.lower() if char.isalnum() else "-" for char in value)
-    parts = [part for part in slug.split("-") if part]
-    return "-".join(parts) or "records"

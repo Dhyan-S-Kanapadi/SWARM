@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langgraph
+groq
+mcp
+python-dotenv
+pydantic
+

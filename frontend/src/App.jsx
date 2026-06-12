@@ -1,1211 +1,958 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  BrainCircuit,
+  CheckCircle2,
+  CircuitBoard,
+  Code2,
+  Download,
+  FileCode2,
+  Layers3,
+  Loader2,
+  Play,
+  Rocket,
+  Sparkles,
+} from "lucide-react";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
-const AGENTS = ["analyst", "architect", "builder", "pitcher"];
-const TABS = ["Demo", "Overview", "Requirements", "Architecture", "Code", "Pitch Deck"];
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
-const defaultPrompt =
-  "Build a salon appointment queue app with dashboard metrics, client follow ups, search, and local JSON data.";
+const STEPS = [
+  { id: "analyst", label: "Product Analyst", icon: BrainCircuit },
+  { id: "architect", label: "Software Architect", icon: CircuitBoard },
+  { id: "builder", label: "SWARM Builder", icon: Code2 },
+  { id: "pitcher", label: "Pitch Strategist", icon: Layers3 },
+];
+
+const SAMPLE_IDEA =
+  "Build a salon appointment manager with customer profiles, staff schedules, service bookings, payment status, reminders, daily appointment queue, revenue metrics, and English/Hindi/Kannada labels.";
 
 export default function App() {
-  const [prompt, setPrompt] = useState(defaultPrompt);
-  const [activeTab, setActiveTab] = useState("Demo");
+  const [idea, setIdea] = useState(SAMPLE_IDEA);
   const [runId, setRunId] = useState("");
   const [status, setStatus] = useState(null);
   const [output, setOutput] = useState(null);
   const [artifacts, setArtifacts] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const [validation, setValidation] = useState(null);
-  const [quality, setQuality] = useState(null);
-  const [runs, setRuns] = useState([]);
+  const [demo, setDemo] = useState(null);
   const [selectedFile, setSelectedFile] = useState("");
-  const [busyAction, setBusyAction] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [activeTab, setActiveTab] = useState("demo");
+  const [preview, setPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState("");
+  const [validationBusy, setValidationBusy] = useState(false);
+  const [qualityBusy, setQualityBusy] = useState(false);
   const [error, setError] = useState("");
-  const pollingRef = useRef(null);
+  const [isStarting, setIsStarting] = useState(false);
 
-  const agentStatuses = status?.agent_statuses || output?.summary?.agents || {};
-  const generatedFiles = output?.generated_files || {};
-  const generatedFileCount = Object.keys(generatedFiles).length;
+  const codeFiles = output?.code_files || {};
+  const selectedFileContent = selectedFile ? codeFiles[selectedFile] : "";
 
-  const selectedFilePath = selectedFile || Object.keys(generatedFiles)[0] || "";
+  const runPhase = useMemo(() => {
+    if (!runId) return "Ready";
+    if (status?.done) return "Complete";
+    if (status?.agent_statuses?.builder === "running") return "Building app";
+    return "Agents running";
+  }, [runId, status]);
 
-  const statusLabel = useMemo(() => {
-    if (!status) return "Idle";
-    if (status.status === "complete") return "Complete";
-    if (status.status === "failed") return "Failed";
-    return status.current_agent ? `Running ${titleCase(status.current_agent)}` : titleCase(status.status);
-  }, [status]);
+  async function startRun(event) {
+    event.preventDefault();
+    const trimmed = idea.trim();
+    if (!trimmed || isStarting) return;
 
-  useEffect(() => {
-    refreshRuns();
-    return () => stopPolling();
-  }, []);
-
-  useEffect(() => {
-    const filePaths = Object.keys(generatedFiles);
-    if (!filePaths.length) {
-      setSelectedFile("");
-      return;
-    }
-    if (!selectedFile || !generatedFiles[selectedFile]) {
-      setSelectedFile(filePaths[0]);
-    }
-  }, [generatedFiles, selectedFile]);
-
-  async function refreshRuns() {
-    try {
-      const data = await apiRequest("/runs");
-      setRuns(data.runs || []);
-    } catch {
-      setRuns([]);
-    }
-  }
-
-  async function startRun() {
-    const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt) {
-      setError("Enter a local business problem before generating an app.");
-      return;
-    }
-
-    stopPolling();
-    setIsGenerating(true);
+    setIsStarting(true);
     setError("");
+    setStatus(null);
     setOutput(null);
     setArtifacts(null);
+    setDemo(null);
     setPreview(null);
-    setValidation(null);
-    setQuality(null);
-    setStatus(null);
+    setQualityBusy(false);
+    setSelectedFile("");
+    setActiveTab("demo");
 
     try {
-      const started = await apiRequest("/run", {
+      const response = await fetch(`${API_BASE_URL}/run`, {
         method: "POST",
-        body: JSON.stringify({ prompt: trimmedPrompt }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idea: trimmed }),
       });
-      setRunId(started.run_id);
-      await pollRun(started.run_id);
-      pollingRef.current = window.setInterval(() => pollRun(started.run_id), 1600);
-    } catch (runError) {
-      setError(runError.message);
-      setIsGenerating(false);
+      if (!response.ok) throw new Error(`Unable to start run (${response.status})`);
+      const data = await response.json();
+      setRunId(data.run_id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsStarting(false);
     }
   }
 
-  async function pollRun(nextRunId = runId) {
-    if (!nextRunId) return;
+  useEffect(() => {
+    if (!runId) return undefined;
+    let cancelled = false;
+    let interval = null;
 
-    try {
-      const nextStatus = await apiRequest(`/status/${nextRunId}`);
-      setStatus(nextStatus);
-      if (nextStatus.status === "complete" || nextStatus.status === "failed") {
-        stopPolling();
-        setIsGenerating(false);
-        const nextOutput = await apiRequest(`/output/${nextRunId}`);
-        setOutput(nextOutput);
-        await Promise.all([refreshRuns(), refreshArtifacts(nextRunId), refreshPreview(nextRunId)]);
+    async function refresh() {
+      try {
+        const statusResponse = await fetch(`${API_BASE_URL}/status/${runId}`);
+        if (!statusResponse.ok) throw new Error(`Unable to load status (${statusResponse.status})`);
+        const nextStatus = await statusResponse.json();
+        if (cancelled) return;
+        setStatus(nextStatus);
+
+        if (nextStatus.done || nextStatus.agent_statuses?.builder === "waiting_for_trae") {
+          const [outputResponse, artifactResponse, demoResponse] = await Promise.all([
+            fetch(`${API_BASE_URL}/output/${runId}`),
+            fetch(`${API_BASE_URL}/artifacts/${runId}`),
+            fetch(`${API_BASE_URL}/demo/${runId}`),
+          ]);
+          if (outputResponse.ok) {
+            const nextOutput = await outputResponse.json();
+            if (!cancelled) {
+              setOutput(nextOutput);
+              const paths = Object.keys(nextOutput.code_files || {});
+              setSelectedFile((current) => current || paths[0] || "");
+            }
+          }
+          if (artifactResponse.ok) {
+            const nextArtifacts = await artifactResponse.json();
+            if (!cancelled) setArtifacts(nextArtifacts);
+          }
+          if (demoResponse.ok) {
+            const nextDemo = await demoResponse.json();
+            if (!cancelled) setDemo(nextDemo);
+          }
+          const previewResponse = await fetch(`${API_BASE_URL}/preview/${runId}/status`);
+          if (previewResponse.ok && !cancelled) {
+            setPreview(await previewResponse.json());
+          }
+        }
+
+        if (nextStatus.done && interval) clearInterval(interval);
+      } catch (err) {
+        if (!cancelled) setError(err.message);
       }
-    } catch (pollError) {
-      stopPolling();
-      setIsGenerating(false);
-      setError(pollError.message);
     }
-  }
 
-  async function loadRun(nextRunId) {
-    stopPolling();
-    setRunId(nextRunId);
-    setError("");
-    setPreview(null);
-    setValidation(null);
-    setQuality(null);
-    try {
-      const [nextStatus, nextOutput] = await Promise.all([
-        apiRequest(`/status/${nextRunId}`),
-        apiRequest(`/output/${nextRunId}`),
-      ]);
-      setStatus(nextStatus);
-      setOutput(nextOutput);
-      await Promise.all([refreshArtifacts(nextRunId), refreshPreview(nextRunId)]);
-    } catch (loadError) {
-      setError(loadError.message);
-    }
-  }
-
-  async function refreshArtifacts(nextRunId = runId) {
-    if (!nextRunId) return;
-    try {
-      const nextArtifacts = await apiRequest(`/artifacts/${nextRunId}`);
-      setArtifacts(nextArtifacts);
-      if (nextArtifacts.validation) setValidation(nextArtifacts.validation);
-      if (nextArtifacts.quality) setQuality(nextArtifacts.quality);
-    } catch {
-      setArtifacts(null);
-    }
-  }
-
-  async function refreshPreview(nextRunId = runId) {
-    if (!nextRunId) return;
-    try {
-      setPreview(await apiRequest(`/preview/${nextRunId}/status`));
-    } catch {
-      setPreview(null);
-    }
-  }
+    interval = setInterval(refresh, 2500);
+    refresh();
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [runId]);
 
   async function runPreviewAction(action) {
-    if (!runId) return;
-    setBusyAction(action);
+    if (!runId || previewBusy) return;
+    setPreviewBusy(action);
     setError("");
     try {
-      const nextPreview = await apiRequest(`/preview/${runId}/${action}`, { method: "POST" });
-      setPreview(nextPreview);
-      await refreshArtifacts(runId);
-    } catch (actionError) {
-      setError(actionError.message);
+      const response = await fetch(`${API_BASE_URL}/preview/${runId}/${action}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : `Preview ${action} failed`);
+      }
+      setPreview(data);
+    } catch (err) {
+      setError(err.message);
     } finally {
-      setBusyAction("");
+      setPreviewBusy("");
     }
   }
 
   async function runValidation() {
-    if (!runId) return;
-    setBusyAction("validate");
+    if (!runId || validationBusy) return;
+    setValidationBusy(true);
     setError("");
     try {
-      const result = await apiRequest(`/validate/${runId}`, { method: "POST" });
-      setValidation(result);
-      await refreshArtifacts(runId);
-    } catch (actionError) {
-      setError(actionError.message);
+      const response = await fetch(`${API_BASE_URL}/validate/${runId}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Validation failed");
+      }
+      setArtifacts((current) => ({ ...(current || {}), validation: data }));
+      setDemo((current) =>
+        current
+          ? {
+              ...current,
+              delivery: {
+                ...current.delivery,
+                validation_status: data.status,
+                validation_checks: (data.checks || []).map((check) => ({
+                  name: check.name,
+                  returncode: check.returncode,
+                  duration_seconds: check.duration_seconds,
+                })),
+              },
+            }
+          : current,
+      );
+    } catch (err) {
+      setError(err.message);
     } finally {
-      setBusyAction("");
+      setValidationBusy(false);
     }
   }
 
-  async function runQuality() {
-    if (!runId) return;
-    setBusyAction("quality");
+  async function runQualityCheck() {
+    if (!runId || qualityBusy) return;
+    setQualityBusy(true);
     setError("");
     try {
-      const result = await apiRequest(`/quality/${runId}`, { method: "POST" });
-      setQuality(result);
-      await refreshArtifacts(runId);
-    } catch (actionError) {
-      setError(actionError.message);
+      const response = await fetch(`${API_BASE_URL}/quality/${runId}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Quality check failed");
+      }
+      setArtifacts((current) => ({ ...(current || {}), quality: data }));
+      setDemo((current) =>
+        current
+          ? {
+              ...current,
+              delivery: {
+                ...current.delivery,
+                quality_score: data.score,
+                quality_grade: data.grade,
+              },
+            }
+          : current,
+      );
+    } catch (err) {
+      setError(err.message);
     } finally {
-      setBusyAction("");
-    }
-  }
-
-  function downloadGeneratedApp() {
-    if (!runId) return;
-    window.location.href = `${API_BASE}/download/${runId}`;
-  }
-
-  function stopPolling() {
-    if (pollingRef.current) {
-      window.clearInterval(pollingRef.current);
-      pollingRef.current = null;
+      setQualityBusy(false);
     }
   }
 
   return (
-    <main className="app-shell">
-      <style>{styles}</style>
+    <main className="min-h-screen bg-[#f4f6f8] text-[#111827]">
+      <section className="border-b border-[#d9dee7] bg-[#0d1b2a] text-white">
+        <div className="mx-auto grid max-w-7xl gap-8 px-4 py-8 sm:px-6 lg:grid-cols-[1.05fr_0.95fr] lg:px-8">
+          <div className="flex flex-col justify-between gap-8">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-md border border-white/15 bg-white/10 px-3 py-2 text-sm text-[#dbeafe]">
+                <Sparkles className="h-4 w-4 text-[#fbbf24]" />
+                SWARM.AI founder workspace
+              </div>
+              <h1 className="mt-5 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">
+                Plain local-business problem to working operations app.
+              </h1>
+              <p className="mt-4 max-w-2xl text-base leading-7 text-[#cbd5e1]">
+                Analyst, architect, SWARM builder, and pitch strategist turn one prompt into a runnable app with customer records, local-language UX, dashboard metrics, validation, and live preview links.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Metric label="Phase" value={runPhase} />
+              <Metric label="Files" value={artifacts?.artifact_counts?.code_files ?? 0} />
+              <Metric label="Pitch fields" value={artifacts?.artifact_counts?.pitch_deck_fields ?? 0} />
+              <Metric label="Errors" value={status?.errors?.length ?? 0} />
+            </div>
+          </div>
 
-      <section className="topbar">
-        <div>
-          <p className="eyebrow">SWARM.AI</p>
-          <h1>Local-Business App Factory</h1>
-        </div>
-        <div className={`status-pill ${status?.status || "idle"}`}>{statusLabel}</div>
-      </section>
-
-      <section className="workspace">
-        <aside className="control-panel">
-          <label className="prompt-field">
-            <span>Business problem</span>
+          <form onSubmit={startRun} className="rounded-lg border border-white/10 bg-white p-4 text-[#111827] shadow-2xl">
+            <label className="text-sm font-semibold" htmlFor="idea">
+              Local business problem
+            </label>
             <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Describe the local business workflow to automate..."
+              id="idea"
+              rows={8}
+              value={idea}
+              onChange={(event) => setIdea(event.target.value)}
+              placeholder="Describe the local shop workflow you want to manage..."
+              className="mt-3 min-h-48 w-full resize-y rounded-md border border-[#cfd6e3] bg-[#f8fafc] px-4 py-3 text-sm leading-6 outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
             />
-          </label>
-
-          <button className="primary-action" type="button" disabled={isGenerating} onClick={startRun}>
-            {isGenerating ? "Generating..." : "Generate app"}
-          </button>
-
-          <section className="run-card">
-            <h2>Run Control</h2>
-            <dl>
-              <div>
-                <dt>Run ID</dt>
-                <dd>{runId || "No active run"}</dd>
-              </div>
-              <div>
-                <dt>Generated files</dt>
-                <dd>{generatedFileCount}</dd>
-              </div>
-              <div>
-                <dt>Output directory</dt>
-                <dd>{output?.output_dir || status?.output_dir || "Pending"}</dd>
-              </div>
-            </dl>
-            <div className="button-row">
-              <button type="button" className="secondary-action" onClick={() => pollRun()} disabled={!runId}>
-                Refresh status
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                type="button"
+                onClick={() => setIdea(SAMPLE_IDEA)}
+                className="inline-flex items-center justify-center gap-2 rounded-md border border-[#cfd6e3] px-4 py-2 text-sm font-semibold text-[#334155] hover:bg-[#f1f5f9]"
+              >
+                <Sparkles className="h-4 w-4" />
+                Load demo idea
               </button>
-              <button type="button" className="secondary-action" onClick={downloadGeneratedApp} disabled={!runId || !output}>
-                Download app
+              <button
+                type="submit"
+                disabled={!idea.trim() || isStarting}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[#2563eb] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:bg-[#94a3b8]"
+              >
+                {isStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
+                Generate app
               </button>
             </div>
-          </section>
+          </form>
+        </div>
+      </section>
 
-          <section className="run-card">
-            <h2>Recent Runs</h2>
-            {runs.length === 0 ? (
-              <p className="muted">No runs yet.</p>
-            ) : (
-              <div className="run-list">
-                {runs.slice(0, 6).map((run) => (
-                  <button key={run.run_id} type="button" onClick={() => loadRun(run.run_id)}>
-                    <span>{run.run_id.slice(0, 8)}</span>
-                    <small>{titleCase(run.status)}</small>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-        </aside>
+      <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+        {error && (
+          <div className="flex items-start gap-2 rounded-md border border-[#fecaca] bg-[#fff1f2] px-4 py-3 text-sm text-[#9f1239]">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
 
-        <section className="main-panel">
-          {error && <div className="error-banner">{error}</div>}
+        <section className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <aside className="flex flex-col gap-4">
+            <RunCard runId={runId} status={status} artifacts={artifacts} />
+            <AgentTimeline status={status} />
+            <PreviewPanel
+              runId={runId}
+              artifacts={artifacts}
+              preview={preview}
+              busy={previewBusy}
+              onAction={runPreviewAction}
+            />
+            <ValidationPanel
+              artifacts={artifacts}
+              busy={validationBusy}
+              onValidate={runValidation}
+            />
+            <QualityPanel
+              artifacts={artifacts}
+              busy={qualityBusy}
+              onCheck={runQualityCheck}
+            />
+          </aside>
 
-          <section className="timeline">
-            {AGENTS.map((agent) => {
-              const agentStatus = agentStatuses[agent]?.status || "pending";
-              return (
-                <article className={`agent ${agentStatus}`} key={agent}>
-                  <span>{titleCase(agent)}</span>
-                  <strong>{titleCase(agentStatus)}</strong>
-                </article>
-              );
-            })}
-          </section>
-
-          <nav className="tabs" aria-label="Artifact tabs">
-            {TABS.map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                className={activeTab === tab ? "active" : ""}
-                onClick={() => setActiveTab(tab)}
-              >
-                {tab}
-              </button>
-            ))}
-          </nav>
-
-          <section className="tab-panel">
-            {renderTab({
-              activeTab,
-              artifacts,
-              busyAction,
-              output,
-              preview,
-              quality,
-              runId,
-              selectedFilePath,
-              setSelectedFile,
-              status,
-              validation,
-              onPreviewAction: runPreviewAction,
-              onRefreshPreview: refreshPreview,
-              onRunQuality: runQuality,
-              onRunValidation: runValidation,
-              onDownload: downloadGeneratedApp,
-            })}
+          <section className="min-w-0 rounded-lg border border-[#d9dee7] bg-white shadow-sm">
+            <div className="flex flex-wrap gap-2 border-b border-[#e5e7eb] px-4 py-3">
+              {[
+                ["demo", "Demo"],
+                ["overview", "Overview"],
+                ["requirements", "Requirements"],
+                ["architecture", "Architecture"],
+                ["code", "Code"],
+                ["pitch", "Pitch Deck"],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveTab(id)}
+                  className={`rounded-md px-3 py-2 text-sm font-semibold transition ${
+                    activeTab === id ? "bg-[#111827] text-white" : "text-[#475569] hover:bg-[#f1f5f9]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="p-4">
+              {activeTab === "demo" && <DemoMode demo={demo} preview={preview} runId={runId} />}
+              {activeTab === "overview" && <Overview output={output} artifacts={artifacts} runId={runId} />}
+              {activeTab === "requirements" && <Requirements requirements={output?.requirements} />}
+              {activeTab === "architecture" && <Architecture architecture={output?.architecture} />}
+              {activeTab === "code" && (
+                <CodeExplorer
+                  files={codeFiles}
+                  selectedFile={selectedFile}
+                  selectedFileContent={selectedFileContent}
+                  onSelect={setSelectedFile}
+                />
+              )}
+              {activeTab === "pitch" && <PitchDeck deck={output?.pitch_deck} />}
+            </div>
           </section>
         </section>
-      </section>
+      </div>
     </main>
   );
 }
 
-function renderTab({
-  activeTab,
-  artifacts,
-  busyAction,
-  output,
-  preview,
-  quality,
-  runId,
-  selectedFilePath,
-  setSelectedFile,
-  status,
-  validation,
-  onPreviewAction,
-  onRefreshPreview,
-  onRunQuality,
-  onRunValidation,
-  onDownload,
-}) {
-  if (!output && activeTab !== "Demo") {
-    return <EmptyState title="No artifacts yet" detail="Generate an app to inspect this section." />;
-  }
+function Metric({ label, value }) {
+  return (
+    <div className="rounded-md border border-white/10 bg-white/10 px-3 py-3">
+      <p className="text-xs uppercase tracking-[0.12em] text-[#93c5fd]">{label}</p>
+      <p className="mt-1 truncate text-lg font-semibold text-white">{String(value)}</p>
+    </div>
+  );
+}
 
-  if (activeTab === "Demo") {
-    return (
-      <div className="demo-stack">
-        <div className="demo-grid">
-          <InfoTile label="Current status" value={status?.status ? titleCase(status.status) : "Idle"} />
-          <InfoTile label="Preview" value={preview?.status ? titleCase(preview.status) : "Not prepared"} />
-          <InfoTile label="Validation" value={validation?.status ? titleCase(validation.status) : "Not run"} />
-          <InfoTile label="Quality" value={quality?.score ?? "Not scored"} />
+function RunCard({ runId, status, artifacts }) {
+  return (
+    <div className="rounded-lg border border-[#d9dee7] bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#64748b]">Run Control</p>
+          <p className="mt-2 break-all font-mono text-sm text-[#0f172a]">{runId || "No active run"}</p>
         </div>
-
-        <PreviewPanel
-          busyAction={busyAction}
-          preview={preview}
-          runId={runId}
-          onAction={onPreviewAction}
-          onRefresh={onRefreshPreview}
-        />
-
-        <ValidationPanel
-          busyAction={busyAction}
-          validation={validation}
-          quality={quality}
-          onRunQuality={onRunQuality}
-          onRunValidation={onRunValidation}
-        />
+        <StatusPill status={status?.done ? "done" : status?.current_agent || "idle"} />
       </div>
-    );
-  }
+      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <Info label="Updated" value={formatTime(status?.updated_at)} />
+        <Info label="App name" value={artifacts?.detected_app?.name || "Pending"} />
+      </div>
+      {runId && (artifacts?.artifact_counts?.code_files ?? 0) > 0 && (
+        <a
+          href={`${API_BASE_URL}/download/${runId}`}
+          className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#111827] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1f2937]"
+        >
+          <Download className="h-4 w-4" />
+          Download app zip
+        </a>
+      )}
+    </div>
+  );
+}
 
-  if (activeTab === "Overview") {
-    return (
-      <div className="overview">
-        <InfoTile label="Run status" value={output?.status ? titleCase(output.status) : "Unknown"} />
-        <InfoTile label="Requirements" value={output?.requirements ? "Ready" : "Missing"} />
-        <InfoTile label="Architecture" value={output?.architecture ? "Ready" : "Missing"} />
-        <InfoTile label="Pitch deck" value={output?.pitch_deck ? "Ready" : "Missing"} />
-        <InfoTile label="Artifacts" value={artifacts?.generated_file_count ?? Object.keys(output?.generated_files || {}).length} />
-        <InfoTile label="Quality target" value={quality?.passed ? "Passed" : "Pending"} />
-        <div className="wide-note">
-          <h2>Artifact Controls</h2>
-          <div className="button-row">
-            <button type="button" className="secondary-action" onClick={onDownload} disabled={!runId}>
-              Download generated app
-            </button>
-            <button type="button" className="secondary-action" onClick={onRunValidation} disabled={!runId || busyAction === "validate"}>
-              {busyAction === "validate" ? "Validating..." : "Run validation"}
-            </button>
-            <button type="button" className="secondary-action" onClick={onRunQuality} disabled={!runId || busyAction === "quality"}>
-              {busyAction === "quality" ? "Scoring..." : "Score quality"}
-            </button>
+function Info({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs text-[#64748b]">{label}</p>
+      <p className="mt-1 truncate font-semibold text-[#111827]">{value}</p>
+    </div>
+  );
+}
+
+function AgentTimeline({ status }) {
+  const statuses = status?.agent_statuses || {};
+  return (
+    <div className="rounded-lg border border-[#d9dee7] bg-white p-4 shadow-sm">
+      <p className="text-sm font-semibold text-[#111827]">Agent timeline</p>
+      <div className="mt-4 flex flex-col gap-3">
+        {STEPS.map((step) => {
+          const Icon = step.icon;
+          const stepStatus = statuses[step.id] || "pending";
+          return (
+            <div key={step.id} className="flex items-center gap-3">
+              <div className={`flex h-9 w-9 items-center justify-center rounded-md ${stepColor(stepStatus)}`}>
+                {stepStatus === "running" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-[#1f2937]">{step.label}</p>
+                <p className="text-xs uppercase tracking-[0.12em] text-[#64748b]">{stepStatus.replaceAll("_", " ")}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {(status?.errors || []).length > 0 && (
+        <div className="mt-4 rounded-md bg-[#fff7ed] p-3 text-sm text-[#9a3412]">
+          {status.errors.map((message) => (
+            <p key={message}>{message}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PreviewPanel({ runId, artifacts, preview, busy, onAction }) {
+  const hasFiles = (artifacts?.artifact_counts?.code_files ?? 0) > 0;
+  const running = preview?.running;
+  return (
+    <div className="rounded-lg border border-[#d9dee7] bg-white p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <Rocket className="mt-0.5 h-5 w-5 text-[#2563eb]" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-[#111827]">Generated app preview</p>
+          <p className="mt-1 text-sm leading-6 text-[#475569]">
+            Prepare and launch the SWARM-built app without leaving the workspace.
+          </p>
+        </div>
+      </div>
+      <PreviewButton
+        disabled={!runId || !hasFiles || Boolean(busy)}
+        onClick={() => onAction("launch")}
+        label="Launch app"
+        busy={busy === "launch"}
+        primary
+      />
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <PreviewButton disabled={!runId || !hasFiles || Boolean(busy)} onClick={() => onAction("prepare")} label="Prepare" busy={busy === "prepare"} />
+        <PreviewButton disabled={!runId || !hasFiles || Boolean(busy)} onClick={() => onAction("install")} label="Install" busy={busy === "install"} />
+        <PreviewButton disabled={!runId || !hasFiles || Boolean(busy)} onClick={() => onAction("start")} label="Start" busy={busy === "start"} />
+        <PreviewButton disabled={!runId || !running || Boolean(busy)} onClick={() => onAction("stop")} label="Stop" busy={busy === "stop"} />
+      </div>
+      {preview?.frontend_url && running && (
+        <a
+          href={preview.frontend_url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#16a34a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#15803d]"
+        >
+          Open generated app <ArrowUpRight className="h-4 w-4" />
+        </a>
+      )}
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <Info label="Prepared" value={preview?.prepared ? "Yes" : "No"} />
+        <Info label="Installed" value={preview?.dependencies_installed ? "Yes" : "No"} />
+      </div>
+      {preview?.frontend_url && (
+        <div className="mt-3 rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-3 text-xs">
+          <p className="font-semibold text-[#111827]">Generated app links</p>
+          <a className="mt-2 block break-all font-mono text-[#2563eb]" href={preview.frontend_url} target="_blank" rel="noreferrer">
+            {preview.frontend_url}
+          </a>
+          <a className="mt-1 block break-all font-mono text-[#2563eb]" href={`${preview.api_url}/api/health`} target="_blank" rel="noreferrer">
+            {preview.api_url}/api/health
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PreviewButton({ label, busy, disabled, onClick, primary = false }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:bg-[#f1f5f9] disabled:text-[#94a3b8] ${
+        primary
+          ? "mt-4 border border-[#15803d] bg-[#16a34a] text-white hover:bg-[#15803d]"
+          : "border border-[#cbd5e1] text-[#334155] hover:bg-[#f8fafc]"
+      }`}
+    >
+      {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+      {label}
+    </button>
+  );
+}
+
+function ValidationPanel({ artifacts, busy, onValidate }) {
+  const hasFiles = (artifacts?.artifact_counts?.code_files ?? 0) > 0;
+  const report = artifacts?.validation;
+  const passed = report?.status === "passed";
+  return (
+    <div className="rounded-lg border border-[#d9dee7] bg-white p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <CheckCircle2 className={`mt-0.5 h-5 w-5 ${passed ? "text-[#16a34a]" : "text-[#64748b]"}`} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-[#111827]">Validation report</p>
+          <p className="mt-1 text-sm leading-6 text-[#475569]">
+            Run install, type-check/test, and build scripts for the generated MVP.
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        disabled={!hasFiles || busy}
+        onClick={onValidate}
+        className="mt-4 inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-md bg-[#2563eb] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:bg-[#94a3b8]"
+      >
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+        Validate generated app
+      </button>
+      {report && (
+        <div className="mt-4">
+          <StatusPill status={report.status} />
+          <div className="mt-3 flex flex-col gap-2">
+            {(report.checks || []).map((check) => (
+              <div key={check.name} className="rounded-md border border-[#e5e7eb] px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-[#111827]">{check.name}</span>
+                  <span className={check.returncode === 0 ? "text-[#15803d]" : "text-[#b91c1c]"}>
+                    exit {check.returncode}
+                  </span>
+                </div>
+                <p className="mt-1 text-[#64748b]">{check.duration_seconds}s</p>
+              </div>
+            ))}
           </div>
         </div>
-        <JsonBlock title="Run summary" value={output?.summary || {}} />
+      )}
+    </div>
+  );
+}
+
+function QualityPanel({ artifacts, busy, onCheck }) {
+  const hasFiles = (artifacts?.artifact_counts?.code_files ?? 0) > 0;
+  const report = artifacts?.quality;
+  const accepted = report?.status === "accepted" || report?.status === "target_met";
+  return (
+    <div className="rounded-lg border border-[#d9dee7] bg-white p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <Sparkles className={`mt-0.5 h-5 w-5 ${accepted ? "text-[#16a34a]" : "text-[#7c3aed]"}`} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-[#111827]">10/10 quality gate</p>
+          <p className="mt-1 text-sm leading-6 text-[#475569]">
+            Score the generated app before presenting it as the final SWARM output.
+          </p>
+        </div>
       </div>
-    );
-  }
+      <button
+        type="button"
+        disabled={!hasFiles || busy}
+        onClick={onCheck}
+        className="mt-4 inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-md bg-[#7c3aed] px-4 py-2 text-sm font-semibold text-white hover:bg-[#6d28d9] disabled:cursor-not-allowed disabled:bg-[#94a3b8]"
+      >
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+        Run quality gate
+      </button>
+      {report && (
+        <div className="mt-4">
+          <div className="grid grid-cols-2 gap-2">
+            <Info label="Score" value={`${report.score}/100`} />
+            <Info label="Grade" value={report.grade} />
+            <Info label="Accepts at" value={report.minimum_score ?? 90} />
+            <Info label="10/10 target" value={report.target_score ?? 90} />
+          </div>
+          <div className="mt-3">
+            <StatusPill status={report.status} />
+          </div>
+          {(report.revision_instructions || []).length > 0 && (
+            <div className="mt-3 rounded-md border border-[#ede9fe] bg-[#faf5ff] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#6d28d9]">Top fixes</p>
+              <div className="mt-2 flex flex-col gap-1">
+                {report.revision_instructions.slice(0, 4).map((item) => (
+                  <p key={item} className="text-xs leading-5 text-[#4c1d95]">{item}</p>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
-  if (activeTab === "Requirements") {
-    return <JsonBlock title="Requirements" value={output?.requirements || {}} />;
-  }
+function Overview({ output, artifacts, runId }) {
+  if (!output && !artifacts) return <EmptyState title="No artifacts yet" text="Start a run to generate product, architecture, code, and pitch output." />;
+  const counts = artifacts?.artifact_counts || {};
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <SummaryBlock title="Problem" value={output?.requirements?.problem_statement} />
+      <SummaryBlock title="Target Audience" value={output?.requirements?.target_audience} />
+      <div className="rounded-lg border border-[#e5e7eb] p-4">
+        <p className="text-sm font-semibold text-[#111827]">Artifact package</p>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <Info label="Code files" value={counts.code_files ?? 0} />
+          <Info label="Pitch fields" value={counts.pitch_deck_fields ?? 0} />
+          <Info label="Dependencies" value={artifacts?.detected_app?.dependencies?.length ?? 0} />
+          <Info label="Dev deps" value={artifacts?.detected_app?.dev_dependencies?.length ?? 0} />
+        </div>
+      </div>
+      <div className="rounded-lg border border-[#e5e7eb] p-4">
+        <p className="text-sm font-semibold text-[#111827]">Demo actions</p>
+        <div className="mt-4 flex flex-col gap-2">
+          <a className="inline-flex items-center gap-2 text-sm font-semibold text-[#2563eb]" href={`${API_BASE_URL}/docs`} target="_blank" rel="noreferrer">
+            Open API docs <ArrowUpRight className="h-4 w-4" />
+          </a>
+          {runId && (artifacts?.artifact_counts?.code_files ?? 0) > 0 && (
+            <a className="inline-flex items-center gap-2 text-sm font-semibold text-[#2563eb]" href={`${API_BASE_URL}/download/${runId}`}>
+              Download generated app <Download className="h-4 w-4" />
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-  if (activeTab === "Architecture") {
-    return <JsonBlock title="Architecture" value={output?.architecture || {}} />;
-  }
-
-  if (activeTab === "Code") {
+function DemoMode({ demo, preview, runId }) {
+  if (!demo) {
     return (
-      <CodeExplorer
-        files={output?.generated_files || {}}
-        selectedFilePath={selectedFilePath}
-        setSelectedFile={setSelectedFile}
+      <EmptyState
+        title="Demo story pending"
+        text="Complete a run to generate the judge-facing mission control summary."
       />
     );
   }
 
-  return <JsonBlock title="Pitch Deck" value={output?.pitch_deck || {}} />;
-}
+  const validationPassed = demo.delivery?.validation_status === "passed";
+  const qualityStrong = (demo.delivery?.quality_score ?? 0) >= 82;
+  const agents = Object.entries(demo.status?.agent_statuses || {});
 
-function PreviewPanel({ busyAction, preview, runId, onAction, onRefresh }) {
-  const isRunning = preview?.status === "running";
   return (
-    <section className="panel-section">
-      <div className="section-heading">
-        <div>
-          <h2>Generated App Preview</h2>
-          <p>Launches the generated Express API on 3001 and Vite frontend on 6200.</p>
+    <div className="grid gap-5">
+      <div className="rounded-xl bg-[#0f172a] p-6 text-white">
+        <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-[#93c5fd]">Demo Mode</p>
+            <h2 className="mt-3 max-w-3xl text-3xl font-semibold leading-tight">
+              {demo.story?.tagline || "Local business workflow transformed into a validated, runnable app."}
+            </h2>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-[#cbd5e1]">{demo.idea}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5 lg:min-w-[620px]">
+            <DemoMetric label="Agents" value={`${agents.filter(([, value]) => value === "done").length}/4`} />
+            <DemoMetric label="Files" value={demo.delivery?.code_file_count ?? 0} />
+            <DemoMetric label="Validation" value={demo.delivery?.validation_status || "not run"} good={validationPassed} />
+            <DemoMetric label="Quality" value={demo.delivery?.quality_score ? `${demo.delivery.quality_score}/100` : "not run"} good={qualityStrong} />
+            <DemoMetric label="Status" value={demo.status?.done ? "complete" : "running"} good={demo.status?.done} />
+          </div>
         </div>
-        <span className={`mini-pill ${preview?.status || "stopped"}`}>{preview?.status ? titleCase(preview.status) : "Not prepared"}</span>
       </div>
 
-      <div className="button-row">
-        {["prepare", "install", "start", "stop", "launch"].map((action) => (
-          <button
-            key={action}
-            type="button"
-            className={action === "launch" ? "primary-small" : "secondary-action"}
-            disabled={!runId || Boolean(busyAction)}
-            onClick={() => onAction(action)}
-          >
-            {busyAction === action ? `${titleCase(action)}...` : titleCase(action)}
-          </button>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <NarrativeCard title="Problem" text={demo.story?.problem} />
+        <NarrativeCard title="Audience" text={demo.story?.audience} />
+        <NarrativeCard title="Solution" text={demo.story?.solution} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-lg border border-[#e5e7eb] p-5">
+          <p className="text-sm font-semibold text-[#111827]">Agent execution chain</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {STEPS.map((step, index) => {
+              const status = demo.status?.agent_statuses?.[step.id] || "pending";
+              const Icon = step.icon;
+              return (
+                <div key={step.id} className="rounded-lg border border-[#e5e7eb] bg-[#f8fafc] p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className={`flex h-9 w-9 items-center justify-center rounded-md ${stepColor(status)}`}>
+                        <Icon className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-[#111827]">{step.label}</p>
+                        <p className="text-xs text-[#64748b]">Step {index + 1}</p>
+                      </div>
+                    </div>
+                    <StatusPill status={status} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[#e5e7eb] p-5">
+          <p className="text-sm font-semibold text-[#111827]">Generated MVP</p>
+          <div className="mt-4 flex flex-col gap-3">
+            <SummaryRow label="App" value={demo.delivery?.app_name || "Generated app"} />
+            <SummaryRow label="Files" value={demo.delivery?.code_file_count ?? 0} />
+            <SummaryRow label="Validation" value={demo.delivery?.validation_status || "not run"} />
+            <SummaryRow label="Quality" value={demo.delivery?.quality_grade || "not run"} />
+            <SummaryRow label="Preview" value={preview?.running ? preview.frontend_url : "Not running"} />
+          </div>
+          {preview?.running && (
+            <a
+              href={preview.frontend_url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#16a34a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#15803d]"
+            >
+              Open live MVP <ArrowUpRight className="h-4 w-4" />
+            </a>
+          )}
+          {runId && (
+            <a
+              href={`${API_BASE_URL}/download/${runId}`}
+              className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-[#cbd5e1] px-4 py-2 text-sm font-semibold text-[#334155] hover:bg-[#f8fafc]"
+            >
+              Download package <Download className="h-4 w-4" />
+            </a>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+        <ListBlock title="MVP Features" items={demo.product?.features || []} />
+        <div className="rounded-lg border border-[#e5e7eb] p-5">
+          <p className="text-sm font-semibold text-[#111827]">Investor close</p>
+          <p className="mt-3 text-sm leading-7 text-[#475569]">{demo.story?.call_to_action || "Pitch deck pending."}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DemoMetric({ label, value, good }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/10 p-3">
+      <p className="text-xs uppercase tracking-[0.12em] text-[#93c5fd]">{label}</p>
+      <p className={`mt-1 truncate text-lg font-semibold ${good ? "text-[#86efac]" : "text-white"}`}>{String(value)}</p>
+    </div>
+  );
+}
+
+function NarrativeCard({ title, text }) {
+  return (
+    <div className="rounded-lg border border-[#e5e7eb] p-5">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">{title}</p>
+      <p className="mt-3 text-sm leading-7 text-[#475569]">{text || "Pending"}</p>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-[#f1f5f9] pb-2 text-sm">
+      <span className="text-[#64748b]">{label}</span>
+      <span className="truncate font-semibold text-[#111827]">{String(value)}</span>
+    </div>
+  );
+}
+
+function SummaryBlock({ title, value }) {
+  return (
+    <div className="rounded-lg border border-[#e5e7eb] p-4">
+      <p className="text-sm font-semibold text-[#111827]">{title}</p>
+      <p className="mt-2 text-sm leading-6 text-[#475569]">{value || "Pending"}</p>
+    </div>
+  );
+}
+
+function Requirements({ requirements }) {
+  if (!requirements || !Object.keys(requirements).length) return <EmptyState title="Requirements pending" text="The Analyst agent will turn the idea into MVP requirements." />;
+  return (
+    <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+      <SummaryBlock title="Problem Statement" value={requirements.problem_statement} />
+      <SummaryBlock title="Target Audience" value={requirements.target_audience} />
+      <ListBlock title="Core Features" items={requirements.core_features} />
+      <ListBlock title="Success Metrics" items={requirements.success_metrics} />
+      <ListBlock title="User Stories" items={requirements.user_stories} wide />
+    </div>
+  );
+}
+
+function Architecture({ architecture }) {
+  if (!architecture || !Object.keys(architecture).length) return <EmptyState title="Architecture pending" text="The Architect agent will produce stack, schema, API, and module plans." />;
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 md:grid-cols-3">
+        {Object.entries(architecture.tech_stack || {}).map(([key, value]) => (
+          <SummaryBlock key={key} title={key.replaceAll("_", " ")} value={String(value)} />
         ))}
-        <button type="button" className="secondary-action" disabled={!runId} onClick={() => onRefresh()}>
-          Refresh preview
-        </button>
       </div>
-
-      <div className="link-grid">
-        <LinkTile label="Generated frontend" href={preview?.frontend_url} enabled={isRunning} />
-        <LinkTile label="API health" href={preview?.api_health_url} enabled={isRunning} />
-        <LinkTile label="API metrics" href={preview?.api_metrics_url} enabled={isRunning} />
-      </div>
-
-      <JsonBlock title="Preview status" value={preview || { status: "not prepared" }} compact />
-    </section>
+      <ListBlock title="API Routes" items={(architecture.api_routes || []).map((route) => `${route.method} ${route.path} - ${route.description}`)} />
+      <JsonPanel title="Database Schema" data={architecture.database_schema} />
+      <JsonPanel title="Folder Structure" data={architecture.folder_structure} language="text" />
+    </div>
   );
 }
 
-function ValidationPanel({ busyAction, validation, quality, onRunQuality, onRunValidation }) {
+function CodeExplorer({ files, selectedFile, selectedFileContent, onSelect }) {
+  const paths = Object.keys(files || {}).sort();
+  if (!paths.length) return <EmptyState title="Code pending" text="When SWARM Builder finishes, the generated project appears here." />;
   return (
-    <section className="panel-grid">
-      <div className="panel-section">
-        <div className="section-heading">
-          <div>
-            <h2>Validation</h2>
-            <p>Runs install, check, test, and build inside the generated app.</p>
-          </div>
-          <span className={`mini-pill ${validation?.status || "pending"}`}>{validation?.status ? titleCase(validation.status) : "Not run"}</span>
+    <div className="grid min-h-[560px] gap-4 lg:grid-cols-[290px_minmax(0,1fr)]">
+      <div className="overflow-hidden rounded-lg border border-[#e5e7eb]">
+        <div className="border-b border-[#e5e7eb] px-3 py-2 text-sm font-semibold">Files</div>
+        <div className="max-h-[520px] overflow-auto">
+          {paths.map((path) => (
+            <button
+              key={path}
+              type="button"
+              onClick={() => onSelect(path)}
+              className={`flex w-full items-center gap-2 border-b border-[#f1f5f9] px-3 py-2 text-left text-xs ${
+                selectedFile === path ? "bg-[#eff6ff] text-[#1d4ed8]" : "text-[#475569] hover:bg-[#f8fafc]"
+              }`}
+            >
+              <FileCode2 className="h-3.5 w-3.5 shrink-0" />
+              <span className="break-all font-mono">{path}</span>
+            </button>
+          ))}
         </div>
-        <button type="button" className="primary-small" disabled={Boolean(busyAction)} onClick={onRunValidation}>
-          {busyAction === "validate" ? "Validating..." : "Run validation"}
-        </button>
-        <CommandList validation={validation} />
       </div>
-
-      <div className="panel-section">
-        <div className="section-heading">
-          <div>
-            <h2>Quality</h2>
-            <p>Scores completeness, workflows, coverage, localization, runnable quality, and polish.</p>
-          </div>
-          <span className={`mini-pill ${quality?.passed ? "passed" : "pending"}`}>{quality?.score ?? "Not scored"}</span>
-        </div>
-        <button type="button" className="primary-small" disabled={Boolean(busyAction)} onClick={onRunQuality}>
-          {busyAction === "quality" ? "Scoring..." : "Score quality"}
-        </button>
-        {quality ? (
-          <div className="score-list">
-            {Object.entries(quality.scores || {}).map(([name, score]) => (
-              <div key={name}>
-                <span>{titleCase(name)}</span>
-                <strong>{score}</strong>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">No quality score yet.</p>
-        )}
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[#e5e7eb]">
+        <div className="border-b border-[#e5e7eb] px-3 py-2 font-mono text-xs text-[#475569]">{selectedFile}</div>
+        <SyntaxHighlighter language={languageForPath(selectedFile)} style={oneLight} customStyle={codeStyle}>
+          {selectedFileContent || ""}
+        </SyntaxHighlighter>
       </div>
-    </section>
+    </div>
   );
 }
 
-function CommandList({ validation }) {
-  if (!validation?.commands?.length) {
-    return <p className="muted">No validation commands have run yet.</p>;
-  }
+function PitchDeck({ deck }) {
+  if (!deck || !Object.keys(deck).length) return <EmptyState title="Pitch pending" text="Pitch Strategist runs after SWARM Builder creates the generated app." />;
   return (
-    <div className="command-list">
-      {validation.commands.map((command, index) => (
-        <details key={`${command.command?.join(" ")}-${index}`}>
-          <summary>
-            <span>{command.command?.join(" ")}</span>
-            <strong>{command.returncode === 0 ? "passed" : `exit ${command.returncode}`}</strong>
-          </summary>
-          <pre>{[command.stdout, command.stderr, command.error].filter(Boolean).join("\n\n") || "No output"}</pre>
-        </details>
+    <div className="grid gap-4 md:grid-cols-2">
+      {Object.entries(deck).map(([key, value]) => (
+        <div key={key} className="rounded-lg border border-[#e5e7eb] p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">{key.replaceAll("_", " ")}</p>
+          <p className="mt-2 text-sm leading-6 text-[#334155]">{Array.isArray(value) ? value.join(", ") : String(value)}</p>
+        </div>
       ))}
     </div>
   );
 }
 
-function LinkTile({ label, href, enabled }) {
+function ListBlock({ title, items = [], wide = false }) {
   return (
-    <a className={`link-tile ${enabled ? "" : "disabled"}`} href={enabled ? href : undefined} target="_blank" rel="noreferrer">
-      <span>{label}</span>
-      <strong>{enabled ? href : "Start preview first"}</strong>
-    </a>
-  );
-}
-
-function CodeExplorer({ files, selectedFilePath, setSelectedFile }) {
-  const filePaths = Object.keys(files);
-  const content = selectedFilePath ? files[selectedFilePath] || "" : "";
-  if (!filePaths.length) {
-    return (
-      <div className="code-view">
-        <h2>Generated Files</h2>
-        <p className="muted">No generated code yet.</p>
+    <div className={`rounded-lg border border-[#e5e7eb] p-4 ${wide ? "lg:col-span-2" : ""}`}>
+      <p className="text-sm font-semibold text-[#111827]">{title}</p>
+      <div className="mt-3 flex flex-col gap-2">
+        {items?.length ? (
+          items.map((item) => (
+            <div key={item} className="flex gap-2 text-sm leading-6 text-[#475569]">
+              <CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-[#16a34a]" />
+              <span>{item}</span>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-[#64748b]">Pending</p>
+        )}
       </div>
-    );
-  }
-
-  return (
-    <div className="code-explorer">
-      <aside className="file-list">
-        <h2>Generated Files</h2>
-        {filePaths.map((path) => (
-          <button
-            key={path}
-            type="button"
-            className={path === selectedFilePath ? "active" : ""}
-            onClick={() => setSelectedFile(path)}
-          >
-            {path}
-          </button>
-        ))}
-      </aside>
-      <section className="code-pane">
-        <div className="code-toolbar">
-          <h2>{selectedFilePath}</h2>
-          <span>{content.split("\n").length} lines</span>
-        </div>
-        <pre className="highlighted-code">
-          <code>{highlightCode(content, selectedFilePath)}</code>
-        </pre>
-      </section>
     </div>
   );
 }
 
-function highlightCode(content, path) {
-  if (!content) return null;
-  const language = languageForPath(path);
-  return content.split(/(\b(?:const|let|var|function|return|import|from|export|async|await|if|else|try|catch|class|new)\b|\"[^\"\n]*\"|'[^'\n]*'|`[^`]*`|\/\/[^\n]*|#[^\n]*)/g).map((part, index) => {
-    let className = "";
-    if (/^(const|let|var|function|return|import|from|export|async|await|if|else|try|catch|class|new)$/.test(part)) {
-      className = "tok-keyword";
-    } else if (/^(\"[^\"\n]*\"|'[^'\n]*'|`[^`]*`)$/.test(part)) {
-      className = "tok-string";
-    } else if (/^(\/\/|#)/.test(part)) {
-      className = "tok-comment";
-    } else if (language === "json" && /^(true|false|null)$/.test(part)) {
-      className = "tok-keyword";
-    }
-    return (
-      <span className={className} key={`${index}-${part.slice(0, 8)}`}>
-        {part}
-      </span>
-    );
-  });
-}
-
-function languageForPath(path) {
-  if (path.endsWith(".json")) return "json";
-  if (path.endsWith(".css")) return "css";
-  if (path.endsWith(".md")) return "markdown";
-  return "javascript";
-}
-
-function InfoTile({ label, value }) {
+function JsonPanel({ title, data, language = "json" }) {
+  const content = typeof data === "string" ? data : JSON.stringify(data || {}, null, 2);
   return (
-    <article className="info-tile">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  );
-}
-
-function JsonBlock({ title, value, compact = false }) {
-  return (
-    <div className={`json-block ${compact ? "compact" : ""}`}>
-      <h2>{title}</h2>
-      <pre>{JSON.stringify(value, null, 2)}</pre>
+    <div className="overflow-hidden rounded-lg border border-[#e5e7eb]">
+      <div className="border-b border-[#e5e7eb] px-4 py-3 text-sm font-semibold">{title}</div>
+      <SyntaxHighlighter language={language} style={oneLight} customStyle={codeStyle}>
+        {content}
+      </SyntaxHighlighter>
     </div>
   );
 }
 
-function EmptyState({ title, detail }) {
+function EmptyState({ title, text }) {
   return (
-    <div className="empty-state">
-      <h2>{title}</h2>
-      <p>{detail}</p>
+    <div className="flex min-h-[360px] flex-col items-center justify-center rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-6 text-center">
+      <Play className="h-8 w-8 text-[#64748b]" />
+      <p className="mt-3 text-base font-semibold text-[#111827]">{title}</p>
+      <p className="mt-1 max-w-md text-sm leading-6 text-[#64748b]">{text}</p>
     </div>
   );
 }
 
-async function apiRequest(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!response.ok) {
-    let detail = `Request failed: ${response.status}`;
-    try {
-      const body = await response.json();
-      detail = body.detail || detail;
-    } catch {
-      // Keep the generic message when the body is not JSON.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-function titleCase(value) {
-  return String(value || "")
-    .replace(/[-_]/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-const styles = `
-:root {
-  color: #1f2933;
-  background: #f5f7fa;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-}
-
-button,
-textarea {
-  font: inherit;
-}
-
-button {
-  cursor: pointer;
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-
-.app-shell {
-  margin: 0 auto;
-  max-width: 1380px;
-  padding: 24px;
-}
-
-.topbar {
-  align-items: center;
-  display: flex;
-  gap: 18px;
-  justify-content: space-between;
-  margin-bottom: 20px;
-}
-
-.eyebrow {
-  color: #1f6f8b;
-  font-size: 0.8rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  margin: 0 0 4px;
-  text-transform: uppercase;
-}
-
-h1,
-h2,
-h3,
-p {
-  margin-top: 0;
-}
-
-h1 {
-  font-size: 2rem;
-  margin-bottom: 0;
-}
-
-.status-pill,
-.mini-pill {
-  border-radius: 999px;
-  border: 1px solid #bcccdc;
-  background: white;
-  color: #334e68;
-  font-weight: 800;
-  padding: 0.65rem 1rem;
-}
-
-.mini-pill {
-  font-size: 0.82rem;
-  padding: 0.45rem 0.7rem;
-  white-space: nowrap;
-}
-
-.status-pill.complete,
-.mini-pill.running,
-.mini-pill.installed,
-.mini-pill.prepared,
-.mini-pill.passed {
-  border-color: #86efac;
-  color: #166534;
-}
-
-.status-pill.failed,
-.mini-pill.failed,
-.mini-pill.install_failed {
-  border-color: #fecaca;
-  color: #b42318;
-}
-
-.status-pill.running,
-.status-pill.queued,
-.mini-pill.pending {
-  border-color: #bae6fd;
-  color: #075985;
-}
-
-.workspace {
-  display: grid;
-  gap: 20px;
-  grid-template-columns: minmax(300px, 390px) 1fr;
-}
-
-.control-panel,
-.main-panel,
-.run-card,
-.info-tile,
-.wide-note,
-.empty-state,
-.panel-section {
-  background: white;
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-}
-
-.control-panel {
-  align-self: start;
-  display: grid;
-  gap: 16px;
-  padding: 18px;
-}
-
-.prompt-field {
-  display: grid;
-  gap: 8px;
-  font-weight: 800;
-}
-
-textarea {
-  border: 1px solid #bcccdc;
-  border-radius: 8px;
-  min-height: 170px;
-  padding: 0.8rem;
-  resize: vertical;
-  width: 100%;
-}
-
-.primary-action,
-.primary-small,
-.secondary-action,
-.tabs button,
-.run-list button,
-.file-list button {
-  border: 0;
-  border-radius: 8px;
-}
-
-.primary-action,
-.primary-small {
-  background: #1565c0;
-  color: white;
-  font-weight: 800;
-}
-
-.primary-action {
-  padding: 0.9rem 1rem;
-}
-
-.primary-small {
-  padding: 0.7rem 0.85rem;
-}
-
-.primary-action:disabled {
-  background: #9fb3c8;
-}
-
-.secondary-action,
-.run-list button,
-.file-list button {
-  background: #edf2f7;
-  color: #1f2933;
-  padding: 0.7rem 0.8rem;
-}
-
-.button-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.run-card {
-  padding: 16px;
-}
-
-.run-card h2 {
-  font-size: 1rem;
-  margin-bottom: 12px;
-}
-
-dl {
-  display: grid;
-  gap: 10px;
-  margin: 0 0 14px;
-}
-
-dt {
-  color: #52606d;
-  font-size: 0.75rem;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-dd {
-  margin: 2px 0 0;
-  overflow-wrap: anywhere;
-}
-
-.run-list {
-  display: grid;
-  gap: 8px;
-}
-
-.run-list button {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-}
-
-.main-panel {
-  min-width: 0;
-  padding: 18px;
-}
-
-.error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  border-radius: 8px;
-  color: #b42318;
-  margin-bottom: 14px;
-  padding: 0.8rem;
-}
-
-.timeline {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
-  margin-bottom: 16px;
-}
-
-.agent {
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-  padding: 12px;
-}
-
-.agent span {
-  color: #52606d;
-  display: block;
-  font-size: 0.8rem;
-}
-
-.agent strong {
-  display: block;
-  margin-top: 4px;
-}
-
-.agent.complete {
-  border-color: #86efac;
-  background: #f0fdf4;
-}
-
-.agent.running {
-  border-color: #bae6fd;
-  background: #f0f9ff;
-}
-
-.agent.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
-}
-
-.tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.tabs button {
-  background: #edf2f7;
-  color: #334e68;
-  padding: 0.65rem 0.85rem;
-}
-
-.tabs button.active {
-  background: #1565c0;
-  color: white;
-}
-
-.tab-panel {
-  min-height: 460px;
-}
-
-.demo-stack {
-  display: grid;
-  gap: 16px;
-}
-
-.demo-grid,
-.overview,
-.panel-grid,
-.link-grid {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(4, minmax(140px, 1fr));
-}
-
-.panel-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.link-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 14px 0;
-}
-
-.info-tile,
-.wide-note,
-.empty-state,
-.panel-section {
-  padding: 16px;
-}
-
-.section-heading {
-  align-items: flex-start;
-  display: flex;
-  gap: 16px;
-  justify-content: space-between;
-  margin-bottom: 14px;
-}
-
-.section-heading h2,
-.section-heading p {
-  margin-bottom: 4px;
-}
-
-.info-tile span {
-  color: #52606d;
-  display: block;
-  font-size: 0.82rem;
-}
-
-.info-tile strong {
-  display: block;
-  font-size: 1.45rem;
-  margin-top: 6px;
-  overflow-wrap: anywhere;
-}
-
-.wide-note,
-.json-block,
-.code-view,
-.panel-section {
-  grid-column: 1 / -1;
-}
-
-.panel-grid .panel-section {
-  grid-column: auto;
-}
-
-.json-block h2,
-.code-view h2 {
-  margin-bottom: 10px;
-}
-
-pre {
-  background: #102a43;
-  border-radius: 8px;
-  color: #d9e2ec;
-  max-height: 560px;
-  overflow: auto;
-  padding: 16px;
-  white-space: pre-wrap;
-}
-
-.json-block.compact pre {
-  max-height: 220px;
-}
-
-details {
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-  margin-bottom: 10px;
-}
-
-summary {
-  cursor: pointer;
-  font-weight: 800;
-  padding: 12px 14px;
-}
-
-details pre {
-  border-radius: 0 0 8px 8px;
-  margin: 0;
-  max-height: 260px;
-}
-
-.command-list summary {
-  align-items: center;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
-}
-
-.score-list {
-  display: grid;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.score-list div {
-  align-items: center;
-  background: #f8fafc;
-  border-radius: 8px;
-  display: flex;
-  justify-content: space-between;
-  padding: 10px;
-}
-
-.link-tile {
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-  color: #075985;
-  display: grid;
-  gap: 5px;
-  padding: 12px;
-  text-decoration: none;
-}
-
-.link-tile.disabled {
-  color: #697586;
-  pointer-events: none;
-}
-
-.link-tile span {
-  color: #52606d;
-  font-size: 0.82rem;
-}
-
-.link-tile strong {
-  overflow-wrap: anywhere;
-}
-
-.code-explorer {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(230px, 320px) 1fr;
-}
-
-.file-list {
-  background: white;
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-  display: grid;
-  gap: 8px;
-  max-height: 690px;
-  overflow: auto;
-  padding: 14px;
-}
-
-.file-list h2 {
-  font-size: 1rem;
-  margin-bottom: 6px;
-}
-
-.file-list button {
-  overflow-wrap: anywhere;
-  text-align: left;
-}
-
-.file-list button.active {
-  background: #1565c0;
-  color: white;
-}
-
-.code-pane {
-  min-width: 0;
-}
-
-.code-toolbar {
-  align-items: center;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.code-toolbar h2 {
-  font-size: 1rem;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.highlighted-code {
-  margin: 0;
-}
-
-.tok-keyword {
-  color: #7dd3fc;
-}
-
-.tok-string {
-  color: #86efac;
-}
-
-.tok-comment {
-  color: #94a3b8;
-}
-
-.muted,
-.empty-state p,
-.wide-note p,
-.section-heading p {
-  color: #697586;
-}
-
-@media (max-width: 980px) {
-  .workspace,
-  .timeline,
-  .demo-grid,
-  .overview,
-  .panel-grid,
-  .link-grid,
-  .code-explorer {
-    grid-template-columns: 1fr;
-  }
-
-  .topbar,
-  .section-heading,
-  .code-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-}
-`;
+function StatusPill({ status }) {
+  return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${pillColor(status)}`}>{status.replaceAll("_", " ")}</span>;
+}
+
+function stepColor(status) {
+  if (status === "done") return "bg-[#dcfce7] text-[#166534]";
+  if (status === "running") return "bg-[#dbeafe] text-[#1d4ed8]";
+  if (status === "waiting_for_trae") return "bg-[#fef3c7] text-[#92400e]";
+  if (status === "error") return "bg-[#fee2e2] text-[#991b1b]";
+  return "bg-[#f1f5f9] text-[#64748b]";
+}
+
+function pillColor(status) {
+  if (status === "done" || status === "Complete" || status === "passed") return "bg-[#dcfce7] text-[#166534]";
+  if (status === "target_met") return "bg-[#dcfce7] text-[#166534]";
+  if (status === "accepted") return "bg-[#dcfce7] text-[#166534]";
+  if (status === "needs_revision") return "bg-[#fef3c7] text-[#92400e]";
+  if (status === "failed") return "bg-[#fee2e2] text-[#991b1b]";
+  if (status === "builder") return "bg-[#fef3c7] text-[#92400e]";
+  if (status === "idle") return "bg-[#f1f5f9] text-[#475569]";
+  return "bg-[#dbeafe] text-[#1d4ed8]";
+}
+
+function languageForPath(path = "") {
+  const extension = path.split(".").pop();
+  const map = {
+    css: "css",
+    html: "html",
+    js: "javascript",
+    json: "json",
+    jsx: "jsx",
+    md: "markdown",
+    py: "python",
+    sql: "sql",
+    ts: "typescript",
+    tsx: "tsx",
+  };
+  return map[extension] || "text";
+}
+
+function formatTime(value) {
+  if (!value) return "Pending";
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+const codeStyle = {
+  margin: 0,
+  minHeight: "520px",
+  maxHeight: "620px",
+  overflow: "auto",
+  background: "#fbfdff",
+  fontSize: "0.82rem",
+};
