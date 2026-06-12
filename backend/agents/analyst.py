@@ -1,4 +1,4 @@
-from backend.agents.llm import allow_llm_fallback, call_groq_json
+from backend.agents.llm import allow_fallback_for_idea, call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -18,7 +18,7 @@ def run_analyst(state: ProjectState) -> ProjectState:
         state.setdefault("llm_calls", []).append({"agent": "analyst", "provider": "groq", "status": "success"})
         complete_agent(state, "analyst")
     except Exception as exc:
-        if not allow_llm_fallback():
+        if not allow_fallback_for_idea(state.get("idea", "")):
             set_agent_status(state, "analyst", "error")
             state["fatal_error"] = True
             raise
@@ -33,6 +33,8 @@ def run_analyst(state: ProjectState) -> ProjectState:
 
 def fallback_requirements(idea: str) -> dict:
     business_type = infer_business_type(idea)
+    if business_type == "bakery":
+        return bakery_fallback_requirements(idea)
     return {
         "problem_statement": f"{business_type.title()} teams need a simple way to manage daily work, customer follow-ups, due dates, and revenue without spreadsheets or missed commitments.",
         "target_audience": f"Local {business_type} owners, staff, and solo operators who need a practical app in their own language.",
@@ -137,6 +139,118 @@ def fallback_requirements(idea: str) -> dict:
         "acceptance_criteria": [
             "User can create, edit, delete, search, and filter records.",
             "Dashboard metrics update from saved records.",
+            "App supports English, Hindi, and Kannada UI labels.",
+            "Generated project passes check, test, and build scripts.",
+        ],
+    }
+
+
+def bakery_fallback_requirements(idea: str) -> dict:
+    return {
+        "problem_statement": "Bakery teams need one place to manage custom cake orders, bread and pastry batches, pickup timing, payment status, customer follow-ups, and daily production without spreadsheet confusion.",
+        "target_audience": "Local bakery owners, counter staff, bakers, and delivery staff who manage customer orders, production queues, and pickup commitments.",
+        "local_context": {
+            "geography": "India-first local bakery context",
+            "business_type": "bakery",
+            "operating_reality": "Small bakery teams take orders through walk-ins, WhatsApp, phone calls, and Instagram while coordinating kitchen production and pickups.",
+            "language_needs": "English plus Hindi and Kannada labels for staff comfort.",
+            "device_constraints": "Must work on laptop and mobile-width browser screens with low setup complexity.",
+        },
+        "primary_personas": [
+            {
+                "name": "Bakery Owner",
+                "role": "Business decision maker",
+                "goals": ["Track orders and revenue", "Avoid missed pickups", "Prioritize production"],
+                "pains": ["Lost WhatsApp orders", "Unclear payment status", "No daily production view"],
+                "permissions": ["create", "edit", "delete", "view metrics"],
+            },
+            {
+                "name": "Counter Staff",
+                "role": "Order taker",
+                "goals": ["Enter customer details quickly", "Update payment and pickup status", "Find orders fast"],
+                "pains": ["Repeated customer calls", "Manual notes", "Language friction"],
+                "permissions": ["create", "edit", "view"],
+            },
+        ],
+        "core_features": [
+            "custom cake order management",
+            "bread and pastry order tracking",
+            "daily bakery production queue",
+            "pickup date and pickup time scheduling",
+            "customer phone, notes, and follow-up history",
+            "payment status and bakery revenue dashboard",
+            "search and filters by status, priority, payment, and due date",
+            "English, Hindi, and Kannada language switcher",
+            "realistic bakery seed data and reset demo flow",
+        ],
+        "user_stories": [
+            "As a bakery owner, I want to see all cake and bread orders due today so that production is prioritized.",
+            "As counter staff, I want to create a custom cake order with pickup time so that no customer request is missed.",
+            "As a bakery owner, I want payment status metrics so that pending collections are visible.",
+            "As staff, I want local-language labels so that daily use is comfortable.",
+        ],
+        "workflow_map": [
+            {
+                "name": "Create bakery order",
+                "trigger": "Customer places a cake, bread, pastry, or catering order",
+                "actor": "Counter staff",
+                "steps": ["Enter customer", "Select bakery item", "Add quantity and notes", "Set pickup date/time", "Save order"],
+                "expected_outcome": "Order appears in production queue and dashboard metrics.",
+            },
+            {
+                "name": "Daily production planning",
+                "trigger": "Start of bakery day",
+                "actor": "Bakery owner",
+                "steps": ["Open dashboard", "Review pending pickups", "Assign staff", "Update production status"],
+                "expected_outcome": "Team knows which cakes, breads, and pastries are due next.",
+            },
+        ],
+        "data_entities": [
+            {
+                "name": "bakery_order",
+                "purpose": "Tracks each custom cake, bread, pastry, or catering order",
+                "important_fields": ["customerName", "phone", "itemType", "quantity", "status", "priority", "pickupDate", "pickupTime", "amount", "paymentStatus", "notes"],
+                "relationships": ["belongs to customer/contact"],
+            }
+        ],
+        "business_rules": [
+            "customer name is required",
+            "bakery item or order title is required",
+            "pickup date is required",
+            "status must be one of new, confirmed, in_progress, completed",
+            "amount must be numeric",
+            "payment status must be pending, partial, or paid",
+        ],
+        "automation_requirements": [
+            {
+                "name": "production queue visibility",
+                "trigger": "dashboard load",
+                "action": "calculate upcoming non-completed bakery orders by pickup date",
+                "fallback": "show all open bakery orders",
+            }
+        ],
+        "localization_requirements": {
+            "default_language": "English",
+            "supported_languages": ["English", "Hindi", "Kannada"],
+            "copy_style": "simple bakery operations language",
+            "local_terms": ["order", "pickup", "amount", "payment", "production queue"],
+            "date_time_currency_format": "India date formatting and INR currency",
+        },
+        "mvp_scope": {
+            "included": ["dashboard", "CRUD bakery orders", "filters", "production queue", "local-language labels", "seed data", "local API"],
+            "excluded": ["payment gateway", "SMS gateway", "multi-user auth", "cloud deployment"],
+        },
+        "success_metrics": ["open bakery orders", "today's pickups", "completed orders", "pending payments", "total revenue"],
+        "seed_data": [
+            "Custom birthday cake order for pickup tomorrow",
+            "Bread subscription batch due this evening",
+            "Pastry box catering order with partial payment",
+            "Completed cupcake order awaiting customer feedback",
+        ],
+        "acceptance_criteria": [
+            "User can create, edit, delete, search, and filter bakery orders.",
+            "Dashboard metrics update from saved bakery records.",
+            "Production queue shows upcoming pickups and assigned staff.",
             "App supports English, Hindi, and Kannada UI labels.",
             "Generated project passes check, test, and build scripts.",
         ],

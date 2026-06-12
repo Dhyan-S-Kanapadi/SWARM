@@ -48,6 +48,18 @@ def allow_llm_fallback() -> bool:
     return os.getenv("SWARM_ALLOW_LLM_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def allow_bakery_website_fallback(idea: str) -> bool:
+    enabled = os.getenv("SWARM_ALLOW_BAKERY_WEBSITE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    lowered = idea.lower()
+    return any(keyword in lowered for keyword in ("bakery", "cake", "cakes", "baker", "pastry", "bread"))
+
+
+def allow_fallback_for_idea(idea: str) -> bool:
+    return allow_llm_fallback() or allow_bakery_website_fallback(idea)
+
+
 def call_groq_json(
     *,
     agent_name: str,
