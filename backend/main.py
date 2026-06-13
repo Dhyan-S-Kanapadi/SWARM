@@ -15,6 +15,7 @@ from backend.state import ProjectState, initial_agent_statuses
 from backend.utils import (
     OUTPUTS_DIR,
     GENERATED_APPS_DIR,
+    PROJECT_ROOT,
     build_artifact_summary,
     build_demo_summary,
     create_code_zip,
@@ -27,7 +28,7 @@ from backend.utils import (
     write_run_summary,
 )
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env")
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="SWARM.AI")
