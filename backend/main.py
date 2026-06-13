@@ -1,5 +1,7 @@
+import logging
 import os
 import subprocess
+from logging.handlers import RotatingFileHandler
 from threading import Lock
 from uuid import uuid4
 
@@ -30,6 +32,20 @@ from backend.utils import (
 
 load_dotenv(PROJECT_ROOT / ".env")
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Setup logging
+logger = logging.getLogger("swarm")
+logger.setLevel(logging.INFO)
+log_handler = RotatingFileHandler(
+    PROJECT_ROOT / "swarm.log",
+    maxBytes=10_000_000,  # 10MB
+    backupCount=5
+)
+log_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+log_handler.setFormatter(log_formatter)
+logger.addHandler(log_handler)
 
 app = FastAPI(title="SWARM.AI")
 
@@ -66,10 +82,12 @@ def execute_workflow(run_id: str) -> None:
         final_state["updated_at"] = utc_now()
         runs[run_id] = final_state
     except Exception as exc:
-        state.setdefault("errors", []).append(f"Workflow failed: {exc}")
+        error_msg = f"Workflow failed: {exc}"
+        state.setdefault("errors", []).append(error_msg)
         state["done"] = True
         state["current_agent"] = "done"
         state["updated_at"] = utc_now()
+        logger.error(f"Run {run_id} failed: {error_msg}", exc_info=True)
     finally:
         write_run_summary(runs[run_id])
 
@@ -97,12 +115,14 @@ def run_project(payload: RunRequest, background_tasks: BackgroundTasks) -> dict[
     with runs_lock:
         runs[run_id] = state
     write_run_summary(state)
+    logger.info(f"Started run {run_id} with idea: {payload.idea[:50]}...")
     background_tasks.add_task(execute_workflow, run_id)
     return {"run_id": run_id}
 
 
 @app.get("/health")
 def health() -> dict:
+    logger.debug("Health check")
     return {
         "status": "ok",
         "service": "SWARM.AI backend",

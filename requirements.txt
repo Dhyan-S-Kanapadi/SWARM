@@ -5,4 +5,5 @@ groq
 mcp
 python-dotenv
 pydantic
+slowapi
 

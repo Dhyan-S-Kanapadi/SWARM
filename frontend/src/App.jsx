@@ -81,7 +81,14 @@ export default function App() {
       const data = await response.json();
       setRunId(data.run_id);
     } catch (err) {
-      setError(err.message);
+      let errorMessage = err.message;
+      if (err.message.includes('fetch') || err.message.includes('Failed to fetch')) {
+        errorMessage = `Backend offline: ${API_BASE_URL}. Is uvicorn running? Start with: python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000`;
+      } else if (err.message.includes('429')) {
+        errorMessage = 'Too many requests. Please wait before trying again.';
+      }
+      setError(errorMessage);
+      console.error('Run error:', err);
     } finally {
       setIsStarting(false);
     }
@@ -95,7 +102,14 @@ export default function App() {
     async function refresh() {
       try {
         const statusResponse = await fetch(`${API_BASE_URL}/status/${runId}`);
-        if (!statusResponse.ok) throw new Error(`Unable to load status (${statusResponse.status})`);
+        if (!statusResponse.ok) {
+          if (statusResponse.status === 429) {
+            console.warn('Rate limited, slowing refresh');
+            // Slow down refresh on rate limit
+            return;
+          }
+          throw new Error(`Unable to load status (${statusResponse.status})`);
+        }
         const nextStatus = await statusResponse.json();
         if (cancelled) return;
         setStatus(nextStatus);
