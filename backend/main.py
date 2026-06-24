@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import subprocess
 import time
+from urllib.request import urlopen
 from threading import Lock
 from uuid import uuid4
 
@@ -311,10 +313,14 @@ def _start_preview_processes(run_id: str, app_path) -> dict:
     )
     time.sleep(2)
     status = _preview_status_payload(run_id, app_path)
+    frontend_probe = _probe_url("http://127.0.0.1:6200")
+    api_probe = _probe_url("http://127.0.0.1:3001/api/health")
     if not status["server_running"] or not status["client_running"]:
         record["last_start_error"] = {
             "server_running": status["server_running"],
             "client_running": status["client_running"],
+            "frontend_probe": frontend_probe,
+            "api_probe": api_probe,
             "server_stderr": _tail_log(log_dir / "server.stderr.log"),
             "client_stderr": _tail_log(log_dir / "client.stderr.log"),
             "server_stdout": _tail_log(log_dir / "server.stdout.log"),
@@ -323,6 +329,7 @@ def _start_preview_processes(run_id: str, app_path) -> dict:
         }
         _stop_preview_processes(record)
         raise HTTPException(status_code=500, detail=record["last_start_error"])
+    record["last_probe"] = {"frontend": frontend_probe, "api": api_probe, "updated_at": utc_now()}
     return status
 
 
@@ -389,7 +396,8 @@ def _ensure_preview_app(run_id: str):
 def _normalize_preview_app(app_path) -> bool:
     package_changed = _normalize_preview_package(app_path)
     seed_changed = _normalize_preview_seed_data(app_path)
-    return package_changed or seed_changed
+    index_changed = _normalize_preview_index(app_path)
+    return package_changed or seed_changed or index_changed
 
 
 def _normalize_preview_package(app_path) -> bool:
@@ -420,11 +428,11 @@ def _normalize_preview_package(app_path) -> bool:
     dependency_defaults = {
         "cors": "^2.8.5",
         "express": "^4.18.3",
-        "react": "^18.2.0",
-        "react-dom": "^18.2.0",
+        "react": "^17.0.2",
+        "react-dom": "^17.0.2",
     }
     for key, value in dependency_defaults.items():
-        if not dependencies.get(key):
+        if not dependencies.get(key) or (key in {"react", "react-dom"} and not str(dependencies.get(key)).startswith("^17.")):
             dependencies[key] = value
             changed = True
 
@@ -454,6 +462,29 @@ def _normalize_preview_seed_data(app_path) -> bool:
         seed_data = {"items": []}
 
     root_seed_path.write_text(json.dumps(seed_data, indent=2), encoding="utf-8")
+    return True
+
+
+def _normalize_preview_index(app_path) -> bool:
+    index_path = app_path / "index.html"
+    if not index_path.exists():
+        return False
+    html = index_path.read_text(encoding="utf-8")
+    normalized = re.sub(
+        r'(<script\b[^>]*type=["\']module["\'][^>]*src=["\'])(?:\./)?(?:src/)?main\.jsx(["\'][^>]*>)',
+        r"\1/src/main.jsx\2",
+        html,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r'(<script\b[^>]*type=["\']module["\'][^>]*src=["\'])(?:\./)?src/main\.jsx(["\'][^>]*>)',
+        r"\1/src/main.jsx\2",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if normalized == html:
+        return False
+    index_path.write_text(normalized, encoding="utf-8")
     return True
 
 
@@ -493,6 +524,7 @@ def _preview_status_payload(run_id: str, app_path) -> dict:
         "last_install": record.get("last_install"),
         "last_build": record.get("last_build"),
         "last_start_error": record.get("last_start_error"),
+        "last_probe": record.get("last_probe"),
         "log_dir": record.get("log_dir"),
         "started_at": record.get("started_at"),
         "stopped_at": record.get("stopped_at"),
@@ -514,3 +546,12 @@ def _tail_log(path, limit: int = 4000) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")[-limit:]
+
+
+def _probe_url(url: str) -> dict:
+    try:
+        with urlopen(url, timeout=5) as response:
+            body = response.read(500).decode("utf-8", errors="ignore")
+            return {"ok": 200 <= response.status < 400, "status": response.status, "body_preview": body}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
