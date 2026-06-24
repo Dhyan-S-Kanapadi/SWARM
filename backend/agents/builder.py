@@ -1,9 +1,28 @@
 import json
+import os
 import re
 from textwrap import dedent
 
+from backend.agents.llm import call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, set_agent_status, write_code_files, write_text
+
+MAX_TOKENS = 6000
+REQUIRED_GENERATED_FILES = {
+    "package.json",
+    "index.html",
+    "vite.config.js",
+    "README.md",
+    "server/index.js",
+    "server/dataStore.js",
+    "server/seed-data.json",
+    "server/app.test.js",
+    "src/main.jsx",
+    "src/App.jsx",
+    "src/styles.css",
+    "src/i18n.js",
+    "src/api.js",
+}
 
 
 def format_builder_prompt(state: ProjectState) -> str:
@@ -129,10 +148,111 @@ def run_builder(state: ProjectState) -> ProjectState:
     state["builder_prompt"] = format_builder_prompt(state)
     write_text(state["run_id"], "builder_prompt.txt", state["builder_prompt"])
 
-    state["code_files"] = generate_internal_app(state)
+    try:
+        if use_llm_builder():
+            state["code_files"] = generate_llm_app(state)
+            state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "groq", "status": "success"})
+        else:
+            state["code_files"] = generate_internal_app(state)
+            state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "internal", "status": "template"})
+    except Exception as exc:
+        if not allow_template_builder_fallback():
+            set_agent_status(state, "builder", "error")
+            state["fatal_error"] = True
+            raise
+        state.setdefault("errors", []).append(f"Builder used template fallback after LLM error: {exc}")
+        state["code_files"] = generate_internal_app(state)
+        state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "internal", "status": "fallback"})
+
     write_code_files(state["run_id"], state["code_files"])
     complete_agent(state, "builder")
     return state
+
+
+def use_llm_builder() -> bool:
+    mode = os.getenv("SWARM_BUILDER_MODE", "llm").strip().lower()
+    if mode in {"template", "internal", "deterministic"}:
+        return False
+    return os.getenv("SWARM_BUILDER_USE_LLM", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_template_builder_fallback() -> bool:
+    return os.getenv("SWARM_BUILDER_ALLOW_TEMPLATE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def generate_llm_app(state: ProjectState) -> dict[str, str]:
+    response = call_groq_json(
+        agent_name="builder",
+        system_prompt=builder_codegen_system_prompt(),
+        user_content=state["builder_prompt"],
+        temperature=0.2,
+        max_tokens=MAX_TOKENS,
+    )
+    return normalize_generated_files(response)
+
+
+def builder_codegen_system_prompt() -> str:
+    return dedent(
+        """
+        You are SWARM Builder, a code-generation agent.
+
+        Return one valid JSON object only, with this exact shape:
+        {
+          "code_files": {
+            "package.json": "file content",
+            "index.html": "file content"
+          }
+        }
+
+        Build a complete, runnable React + Express app that is specific to the user's business prompt.
+        Do not output a generic fallback app, landing page, explanation, markdown, or placeholders.
+
+        Required files:
+        - package.json
+        - index.html
+        - vite.config.js
+        - README.md
+        - server/index.js
+        - server/dataStore.js
+        - server/seed-data.json
+        - server/app.test.js
+        - src/main.jsx
+        - src/App.jsx
+        - src/styles.css
+        - src/i18n.js
+        - src/api.js
+
+        Requirements:
+        - The UI must visibly match the requested domain, records, labels, workflows, and seed data.
+        - Include dashboard metrics, CRUD, search/filter, validation, local JSON persistence, reset demo data, and English/Hindi/Kannada labels.
+        - Use only React, Vite, Express, CORS, and Node built-ins.
+        - package.json must include scripts: dev, server, check, test, build.
+        - Express API must expose /api/health, /api/items, /api/items/:id, /api/metrics, and /api/reset.
+        - Keep the app simple enough to run locally without extra setup or external services.
+        """
+    ).strip()
+
+
+def normalize_generated_files(response: dict) -> dict[str, str]:
+    files = response.get("code_files") or response.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("Builder LLM response must include a code_files object")
+
+    normalized: dict[str, str] = {}
+    for raw_path, raw_content in files.items():
+        path = str(raw_path).replace("\\", "/").strip().lstrip("/")
+        if not path or ".." in path.split("/"):
+            raise ValueError(f"Unsafe generated file path: {raw_path}")
+        if path.startswith(("node_modules/", ".git/", "dist/", "build/")):
+            continue
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            raise ValueError(f"Generated file is empty or invalid: {path}")
+        normalized[path] = raw_content
+
+    missing = sorted(REQUIRED_GENERATED_FILES - set(normalized))
+    if missing:
+        raise ValueError(f"Builder LLM response missing required files: {', '.join(missing)}")
+    return normalized
 
 
 def generate_internal_app(state: ProjectState) -> dict[str, str]:

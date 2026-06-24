@@ -25,6 +25,7 @@ PLACEHOLDER_API_KEYS = {
 AGENT_MIN_TOKENS = {
     "analyst": 2200,
     "architect": 2400,
+    "builder": 4200,
     "pitcher": 900,
 }
 

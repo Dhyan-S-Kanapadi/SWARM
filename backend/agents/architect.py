@@ -1,4 +1,5 @@
 import json
+import os
 
 from backend.agents.llm import allow_fallback_for_idea, call_groq_json
 from backend.state import ProjectState
@@ -20,6 +21,13 @@ def run_architect(state: ProjectState) -> ProjectState:
         state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
+        if allow_architect_parse_fallback(exc):
+            state.setdefault("errors", []).append(f"Architect used compact architecture after malformed LLM JSON: {exc}")
+            state["architecture"] = fallback_architecture(state.get("requirements", {}))
+            state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "json_recovered"})
+            complete_agent(state, "architect")
+            write_json(state["run_id"], "architecture.json", state["architecture"])
+            return state
         if not allow_fallback_for_idea(state.get("idea", "")):
             set_agent_status(state, "architect", "error")
             state["fatal_error"] = True
@@ -31,6 +39,23 @@ def run_architect(state: ProjectState) -> ProjectState:
 
     write_json(state["run_id"], "architecture.json", state["architecture"])
     return state
+
+
+def allow_architect_parse_fallback(exc: Exception) -> bool:
+    enabled = os.getenv("SWARM_ALLOW_ARCHITECT_PARSE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    message = str(exc).lower()
+    return any(
+        signal in message
+        for signal in (
+            "unterminated string",
+            "json",
+            "expecting",
+            "extra data",
+            "invalid control character",
+        )
+    )
 
 
 def compact_requirements(requirements: dict) -> dict:
