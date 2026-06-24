@@ -22,9 +22,10 @@ def run_architect(state: ProjectState) -> ProjectState:
         complete_agent(state, "architect")
     except Exception as exc:
         if allow_architect_parse_fallback(exc):
-            state.setdefault("errors", []).append(f"Architect used compact architecture after malformed LLM JSON: {exc}")
             state["architecture"] = fallback_architecture(state.get("requirements", {}))
-            state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "json_recovered"})
+            state.setdefault("llm_calls", []).append(
+                {"agent": "architect", "provider": "groq", "status": "json_recovered", "detail": "malformed_json"}
+            )
             complete_agent(state, "architect")
             write_json(state["run_id"], "architecture.json", state["architecture"])
             return state

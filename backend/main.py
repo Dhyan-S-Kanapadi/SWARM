@@ -1,5 +1,7 @@
+import json
 import os
 import subprocess
+import time
 from threading import Lock
 from uuid import uuid4
 
@@ -219,8 +221,10 @@ def install_preview_dependencies(run_id: str) -> dict:
 @app.post("/preview/{run_id}/launch")
 def launch_preview(run_id: str) -> dict:
     app_path = _ensure_preview_app(run_id)
-    if not (app_path / "node_modules").exists():
+    normalized = _normalize_preview_app(app_path)
+    if normalized or not (app_path / "node_modules").exists():
         _install_preview_dependencies(run_id, app_path)
+    _build_preview_client(run_id, app_path)
     return _start_preview_processes(run_id, app_path)
 
 
@@ -255,29 +259,41 @@ def start_preview(run_id: str) -> dict:
         raise HTTPException(status_code=400, detail="Generated app has no package.json")
     if not (app_path / "node_modules").exists():
         raise HTTPException(status_code=409, detail="Install dependencies before starting preview")
+    _normalize_preview_app(app_path)
+    if not (app_path / "dist").exists():
+        _build_preview_client(run_id, app_path)
     return _start_preview_processes(run_id, app_path)
 
 
 def _start_preview_processes(run_id: str, app_path) -> dict:
     record = preview_processes.setdefault(run_id, {})
     _stop_preview_processes(record)
+    _normalize_preview_app(app_path)
 
     env = os.environ.copy()
     env["PORT"] = "3001"
+    env["VITE_API_BASE_URL"] = "http://127.0.0.1:3001"
+
+    log_dir = app_path / ".swarm-preview"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    server_stdout = open(log_dir / "server.stdout.log", "w", encoding="utf-8")
+    server_stderr = open(log_dir / "server.stderr.log", "w", encoding="utf-8")
+    client_stdout = open(log_dir / "client.stdout.log", "w", encoding="utf-8")
+    client_stderr = open(log_dir / "client.stderr.log", "w", encoding="utf-8")
 
     server_process = subprocess.Popen(
         ["npm.cmd", "run", "dev:server"],
         cwd=app_path,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=server_stdout,
+        stderr=server_stderr,
     )
     client_process = subprocess.Popen(
-        ["npm.cmd", "run", "dev:client", "--", "--host", "127.0.0.1", "--port", "6200"],
+        ["npm.cmd", "run", "preview:client", "--", "--port", "6200"],
         cwd=app_path,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=client_stdout,
+        stderr=client_stderr,
     )
 
     record.update(
@@ -289,10 +305,25 @@ def _start_preview_processes(run_id: str, app_path) -> dict:
             "client_pid": client_process.pid,
             "server_process": server_process,
             "client_process": client_process,
+            "log_dir": str(log_dir),
             "started_at": utc_now(),
         }
     )
-    return _preview_status_payload(run_id, app_path)
+    time.sleep(2)
+    status = _preview_status_payload(run_id, app_path)
+    if not status["server_running"] or not status["client_running"]:
+        record["last_start_error"] = {
+            "server_running": status["server_running"],
+            "client_running": status["client_running"],
+            "server_stderr": _tail_log(log_dir / "server.stderr.log"),
+            "client_stderr": _tail_log(log_dir / "client.stderr.log"),
+            "server_stdout": _tail_log(log_dir / "server.stdout.log"),
+            "client_stdout": _tail_log(log_dir / "client.stdout.log"),
+            "updated_at": utc_now(),
+        }
+        _stop_preview_processes(record)
+        raise HTTPException(status_code=500, detail=record["last_start_error"])
+    return status
 
 
 @app.post("/preview/{run_id}/stop")
@@ -355,6 +386,96 @@ def _ensure_preview_app(run_id: str):
     return app_path
 
 
+def _normalize_preview_app(app_path) -> bool:
+    package_changed = _normalize_preview_package(app_path)
+    seed_changed = _normalize_preview_seed_data(app_path)
+    return package_changed or seed_changed
+
+
+def _normalize_preview_package(app_path) -> bool:
+    package_json_path = app_path / "package.json"
+    if not package_json_path.exists():
+        return False
+
+    package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
+    changed = False
+
+    scripts = package_json.setdefault("scripts", {})
+    script_defaults = {
+        "dev:server": "node server/index.js",
+        "dev:client": "vite",
+        "preview:client": "vite preview --host 127.0.0.1 --strictPort",
+        "server": "node server/index.js",
+        "dev": "vite",
+        "check": "npm run test",
+        "test": "node server/app.test.js",
+        "build": "vite build",
+    }
+    for key, value in script_defaults.items():
+        if not scripts.get(key) or (key == "preview:client" and scripts.get(key) != value):
+            scripts[key] = value
+            changed = True
+
+    dependencies = package_json.setdefault("dependencies", {})
+    dependency_defaults = {
+        "cors": "^2.8.5",
+        "express": "^4.18.3",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+    }
+    for key, value in dependency_defaults.items():
+        if not dependencies.get(key):
+            dependencies[key] = value
+            changed = True
+
+    dev_dependencies = package_json.setdefault("devDependencies", {})
+    if not dev_dependencies.get("vite"):
+        dev_dependencies["vite"] = "^5.4.11"
+        changed = True
+
+    if changed:
+        package_json_path.write_text(json.dumps(package_json, indent=2), encoding="utf-8")
+    return changed
+
+
+def _normalize_preview_seed_data(app_path) -> bool:
+    root_seed_path = app_path / "seed-data.json"
+    server_seed_path = app_path / "server" / "seed-data.json"
+    if root_seed_path.exists() or not server_seed_path.exists():
+        return False
+
+    try:
+        seed_data = json.loads(server_seed_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    if isinstance(seed_data, list):
+        seed_data = {"items": seed_data}
+    elif isinstance(seed_data, dict) and "items" not in seed_data:
+        seed_data = {"items": []}
+
+    root_seed_path.write_text(json.dumps(seed_data, indent=2), encoding="utf-8")
+    return True
+
+
+def _build_preview_client(run_id: str, app_path) -> None:
+    result = subprocess.run(
+        ["npm.cmd", "run", "build"],
+        cwd=app_path,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    preview_processes.setdefault(run_id, {})["last_build"] = {
+        "returncode": result.returncode,
+        "stdout": result.stdout[-4000:],
+        "stderr": result.stderr[-4000:],
+        "updated_at": utc_now(),
+    }
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=preview_processes[run_id]["last_build"])
+
+
 def _preview_status_payload(run_id: str, app_path) -> dict:
     record = preview_processes.get(run_id, {})
     server_running = _process_is_running(record.get("server_process"))
@@ -370,6 +491,9 @@ def _preview_status_payload(run_id: str, app_path) -> dict:
         "client_running": client_running,
         "running": server_running or client_running,
         "last_install": record.get("last_install"),
+        "last_build": record.get("last_build"),
+        "last_start_error": record.get("last_start_error"),
+        "log_dir": record.get("log_dir"),
         "started_at": record.get("started_at"),
         "stopped_at": record.get("stopped_at"),
     }
@@ -384,3 +508,9 @@ def _stop_preview_processes(record: dict) -> None:
         process = record.get(key)
         if process and process.poll() is None:
             process.terminate()
+
+
+def _tail_log(path, limit: int = 4000) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")[-limit:]
