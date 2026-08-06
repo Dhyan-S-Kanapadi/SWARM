@@ -108,7 +108,7 @@ def fallback_architecture(requirements: dict) -> dict:
         "tech_stack": {
             "frontend": "React with Vite",
             "backend": "Node.js with Express",
-            "database": "Local JSON persistence with seed data",
+            "database": "PostgreSQL persistence with seed data",
             "styling": "Plain CSS responsive dashboard",
             "testing": "Node test runner plus vite build",
             "local_run_strategy": "npm install, npm run dev, npm run check, npm run test, npm run build",
