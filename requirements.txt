@@ -5,6 +5,7 @@ groq
 mcp
 python-dotenv
 pydantic
+psycopg[binary]>=3.2,<4
 openhands-sdk==1.40.1
 openhands-tools==1.40.0
 
