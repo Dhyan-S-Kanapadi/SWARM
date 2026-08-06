@@ -6,7 +6,7 @@ SWARM.AI is an AI app generator for local businesses. The goal is: a local shop 
 
 ## Current Direction
 
-We originally tried to integrate Trae MCP, but later the hackathon requirement changed and Trae was no longer mandatory. So the project was upgraded to work independently without Trae.
+SWARM.AI runs as an independent local app generator with an internal Builder.
 
 Current flow:
 
@@ -41,9 +41,9 @@ Generated apps include:
 - README
 - Preview launch support
 
-## Important Pivot
+## Builder Behavior
 
-The Builder agent does not use Trae anymore. It generates the app internally.
+The Builder agent generates the app internally.
 
 Groq is used for:
 
@@ -189,7 +189,7 @@ GitHub was up to date before adding this file.
 
 ## Current Limitation
 
-The builder is reliable but still template-driven. It creates strong local-business management apps, but it is not yet a fully free-form coding agent like Bolt/Lovable. That was intentional so the hackathon demo remains stable and generated apps pass validation.
+The builder is reliable but still template-driven. It creates strong local-business management apps, but it is not yet a fully free-form coding agent like Bolt/Lovable. That keeps generated apps stable and helps them pass validation.
 
 ## Best Current Pitch
 

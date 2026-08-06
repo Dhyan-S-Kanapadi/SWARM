@@ -1,7 +1,6 @@
 param(
     [int]$BackendPort = 8000,
-    [int]$FrontendPort = 5173,
-    [switch]$WithTraeWorker
+    [int]$FrontendPort = 5173
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,12 +87,3 @@ Write-Host "1. Type an idea in the SWARM UI and click Generate MVP."
 Write-Host "2. Analyst and Architect create the product blueprint."
 Write-Host "3. SWARM Builder generates the app internally."
 Write-Host "4. Use Preview, Validate, and Quality Gate from the UI."
-
-if ($WithTraeWorker) {
-    Write-Host ""
-    Write-Host "Starting optional legacy Trae auto-worker. Focus Trae chat input once before any legacy Builder handoff."
-    Start-Process `
-        -FilePath "powershell.exe" `
-        -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "scripts\trae_auto_worker.ps1"), "-SwarmBaseUrl", $BackendUrl `
-        -WorkingDirectory $Root | Out-Null
-}
