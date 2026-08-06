@@ -20,7 +20,7 @@ The JSON object must contain exactly these top-level keys:
 
 Architecture rules:
 - Make the app runnable with local commands after dependency install. Avoid paid services and external infrastructure.
-- Prefer React with Material UI or another already-declared frontend stack, Node.js with Express for backend, and a local-friendly database/storage path. If PostgreSQL is specified by requirements, include a local development fallback or clear Docker/env setup.
+- Prefer React with Material UI or another already-declared frontend stack, Node.js with Express for backend, and PostgreSQL for persistence. Include clear local Docker and environment setup for PostgreSQL.
 - Every important UI screen must map to APIs, data entities, and validation rules.
 - Include local-language support as a first-class architecture concern: language files, locale switcher, formatting, and translated demo copy.
 - Include seed data so the generated app is impressive immediately after startup.

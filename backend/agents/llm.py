@@ -25,6 +25,7 @@ PLACEHOLDER_API_KEYS = {
 AGENT_MIN_TOKENS = {
     "analyst": 2200,
     "architect": 2400,
+    "builder": 4200,
     "pitcher": 900,
 }
 
@@ -46,6 +47,26 @@ def groq_configured() -> bool:
 
 def allow_llm_fallback() -> bool:
     return os.getenv("SWARM_ALLOW_LLM_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_bakery_website_fallback(idea: str) -> bool:
+    enabled = os.getenv("SWARM_ALLOW_BAKERY_WEBSITE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    lowered = idea.lower()
+    return any(keyword in lowered for keyword in ("bakery", "cake", "cakes", "baker", "pastry", "bread"))
+
+
+def allow_saloon_website_fallback(idea: str) -> bool:
+    enabled = os.getenv("SWARM_ALLOW_SALOON_WEBSITE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    lowered = idea.lower()
+    return any(keyword in lowered for keyword in ("salon", "saloon", "beauty", "spa", "hair", "makeup", "barber"))
+
+
+def allow_fallback_for_idea(idea: str) -> bool:
+    return allow_llm_fallback() or allow_bakery_website_fallback(idea) or allow_saloon_website_fallback(idea)
 
 
 def call_groq_json(

@@ -1,6 +1,7 @@
 import json
+import os
 
-from backend.agents.llm import allow_llm_fallback, call_groq_json
+from backend.agents.llm import allow_fallback_for_idea, call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -20,7 +21,15 @@ def run_architect(state: ProjectState) -> ProjectState:
         state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
-        if not allow_llm_fallback():
+        if allow_architect_parse_fallback(exc):
+            state["architecture"] = fallback_architecture(state.get("requirements", {}))
+            state.setdefault("llm_calls", []).append(
+                {"agent": "architect", "provider": "groq", "status": "json_recovered", "detail": "malformed_json"}
+            )
+            complete_agent(state, "architect")
+            write_json(state["run_id"], "architecture.json", state["architecture"])
+            return state
+        if not allow_fallback_for_idea(state.get("idea", "")):
             set_agent_status(state, "architect", "error")
             state["fatal_error"] = True
             raise
@@ -31,6 +40,23 @@ def run_architect(state: ProjectState) -> ProjectState:
 
     write_json(state["run_id"], "architecture.json", state["architecture"])
     return state
+
+
+def allow_architect_parse_fallback(exc: Exception) -> bool:
+    enabled = os.getenv("SWARM_ALLOW_ARCHITECT_PARSE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    message = str(exc).lower()
+    return any(
+        signal in message
+        for signal in (
+            "unterminated string",
+            "json",
+            "expecting",
+            "extra data",
+            "invalid control character",
+        )
+    )
 
 
 def compact_requirements(requirements: dict) -> dict:
@@ -82,7 +108,7 @@ def fallback_architecture(requirements: dict) -> dict:
         "tech_stack": {
             "frontend": "React with Vite",
             "backend": "Node.js with Express",
-            "database": "Local JSON persistence with seed data",
+            "database": "PostgreSQL persistence with seed data",
             "styling": "Plain CSS responsive dashboard",
             "testing": "Node test runner plus vite build",
             "local_run_strategy": "npm install, npm run dev, npm run check, npm run test, npm run build",
