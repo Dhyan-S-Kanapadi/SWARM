@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import os
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -11,6 +12,11 @@ from backend.agents.builder_agent.tools.generate_api_routes import generate_api_
 from backend.agents.builder_agent.tools.generate_ui_screens import generate_ui_screens
 from backend.agents.builder_agent.tools.scaffold_auth import scaffold_auth
 from backend.agents.builder_agent.tools.schema_apply import apply_database_schema
+from backend.agents.builder_agent.database import (
+    database_namespace,
+    database_url_for_namespace,
+    ensure_database_namespace,
+)
 
 
 _REQUIRED_ARCHITECTURE_FIELDS = {
@@ -71,7 +77,27 @@ def validate_architecture(architecture: Mapping[str, Any]) -> None:
 
 def _schema_apply_node(state: BuilderGraphState) -> dict[str, Any]:
     architecture = state["architecture"]
-    return {"schema_result": apply_database_schema(architecture["database_schema"])}
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        return {"schema_result": apply_database_schema(architecture["database_schema"])}
+
+    namespace = database_namespace(state["run_id"])
+    try:
+        ensure_database_namespace(database_url, namespace)
+    except Exception as exc:
+        return {
+            "schema_result": {
+                "tables_created": [],
+                "errors": [f"PostgreSQL namespace setup failed: {type(exc).__name__}: {exc}"],
+                "sql": [],
+            }
+        }
+    scoped_url = database_url_for_namespace(database_url, namespace)
+    return {
+        "schema_result": apply_database_schema(
+            architecture["database_schema"], scoped_url
+        )
+    }
 
 
 def _generate_api_routes_node(state: BuilderGraphState) -> dict[str, dict[str, str]]:

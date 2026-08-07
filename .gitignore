@@ -3,6 +3,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.openhands_smoke_home/
+backend/_openhands_smoke_workspace/.openhands_persistence/
 
 frontend/node_modules/
 frontend/dist/
