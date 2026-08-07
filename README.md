@@ -46,6 +46,24 @@ Edit `.env`:
 GROQ_API_KEY=your_groq_api_key_here
 ```
 
+## Per-Agent LLM Routing
+
+SWARM uses LiteLLM's Python SDK for Analyst, Architect, and Pitcher. Configure
+each agent with a provider-prefixed model and, when needed, a separate key:
+
+```env
+LLM_ANALYST_MODEL=groq/openai/gpt-oss-120b
+LLM_ANALYST_API_KEY=your_groq_key
+LLM_ARCHITECT_MODEL=anthropic/claude-sonnet-4-5-20250929
+LLM_ARCHITECT_API_KEY=your_anthropic_key
+LLM_PITCHER_MODEL=openai/gpt-4o-mini
+LLM_PITCHER_API_KEY=your_openai_key
+```
+
+Leaving an `LLM_<AGENT>_API_KEY` blank uses the provider's standard key such
+as `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`. Different models
+on one provider key still share that provider account's rate limits.
+
 Run the backend:
 
 ```bash

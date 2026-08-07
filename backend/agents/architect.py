@@ -2,7 +2,7 @@ import json
 import os
 from datetime import date, timedelta
 
-from backend.agents.llm import allow_fallback_for_idea, call_groq_json
+from backend.agents.llm import allow_fallback_for_idea, call_llm_json, llm_provider_for_agent
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -16,7 +16,7 @@ class ArchitectureContractError(ValueError):
 def run_architect(state: ProjectState) -> ProjectState:
     set_agent_status(state, "architect", "running")
     try:
-        state["architecture"] = call_groq_json(
+        state["architecture"] = call_llm_json(
             agent_name="architect",
             system_prompt=load_prompt("architect_prompt.txt"),
             user_content=json.dumps(compact_requirements(state.get("requirements", {})), separators=(",", ":")),
@@ -24,13 +24,13 @@ def run_architect(state: ProjectState) -> ProjectState:
             max_tokens=MAX_TOKENS,
         )
         validate_architecture_contract(state["architecture"])
-        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
+        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": llm_provider_for_agent("architect"), "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
         if isinstance(exc, ArchitectureContractError):
             state["architecture"] = fallback_architecture(state.get("requirements", {}))
             state.setdefault("llm_calls", []).append(
-                {"agent": "architect", "provider": "groq", "status": "contract_recovered", "detail": str(exc)}
+                {"agent": "architect", "provider": llm_provider_for_agent("architect"), "status": "contract_recovered", "detail": str(exc)}
             )
             complete_agent(state, "architect")
             write_json(state["run_id"], "architecture.json", state["architecture"])
@@ -38,7 +38,7 @@ def run_architect(state: ProjectState) -> ProjectState:
         if allow_architect_parse_fallback(exc):
             state["architecture"] = fallback_architecture(state.get("requirements", {}))
             state.setdefault("llm_calls", []).append(
-                {"agent": "architect", "provider": "groq", "status": "json_recovered", "detail": "malformed_json"}
+                {"agent": "architect", "provider": llm_provider_for_agent("architect"), "status": "json_recovered", "detail": "malformed_json"}
             )
             complete_agent(state, "architect")
             write_json(state["run_id"], "architecture.json", state["architecture"])
@@ -49,7 +49,7 @@ def run_architect(state: ProjectState) -> ProjectState:
             raise
         state.setdefault("errors", []).append(f"Architect used fallback after LLM error: {exc}")
         state["architecture"] = fallback_architecture(state.get("requirements", {}))
-        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "fallback"})
+        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": llm_provider_for_agent("architect"), "status": "fallback"})
         complete_agent(state, "architect")
 
     write_json(state["run_id"], "architecture.json", state["architecture"])

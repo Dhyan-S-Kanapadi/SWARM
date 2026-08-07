@@ -4,7 +4,7 @@ import re
 from textwrap import dedent
 
 from backend.agents.builder_agent.agent import run_build
-from backend.agents.llm import call_groq_json
+from backend.agents.llm import call_llm_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, set_agent_status, write_code_files, write_text
 
@@ -176,7 +176,7 @@ def allow_template_builder_fallback() -> bool:
 
 
 def generate_llm_app(state: ProjectState) -> dict[str, str]:
-    response = call_groq_json(
+    response = call_llm_json(
         agent_name="builder",
         system_prompt=builder_codegen_system_prompt(),
         user_content=state["builder_prompt"],
