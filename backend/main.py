@@ -283,15 +283,33 @@ def _start_preview_processes(run_id: str, app_path) -> dict:
     client_stdout = open(log_dir / "client.stdout.log", "w", encoding="utf-8")
     client_stderr = open(log_dir / "client.stderr.log", "w", encoding="utf-8")
 
+    schema_setup = subprocess.run(
+        ["node", "server/setup-db.js"],
+        cwd=app_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    record["last_schema_setup"] = {
+        "returncode": schema_setup.returncode,
+        "stdout": schema_setup.stdout[-4000:],
+        "stderr": schema_setup.stderr[-4000:],
+        "updated_at": utc_now(),
+    }
+    if schema_setup.returncode != 0:
+        raise HTTPException(status_code=500, detail=record["last_schema_setup"])
+
     server_process = subprocess.Popen(
-        ["npm.cmd", "run", "dev:server"],
+        ["node", "server/index.js"],
         cwd=app_path,
         env=env,
         stdout=server_stdout,
         stderr=server_stderr,
     )
     client_process = subprocess.Popen(
-        ["npm.cmd", "run", "preview:client", "--", "--port", "6200"],
+        ["node", "node_modules/vite/bin/vite.js", "preview", "--host", "127.0.0.1", "--strictPort", "--port", "6200"],
         cwd=app_path,
         env=env,
         stdout=client_stdout,
@@ -428,11 +446,11 @@ def _normalize_preview_package(app_path) -> bool:
     dependency_defaults = {
         "cors": "^2.8.5",
         "express": "^4.18.3",
-        "react": "^17.0.2",
-        "react-dom": "^17.0.2",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
     }
     for key, value in dependency_defaults.items():
-        if not dependencies.get(key) or (key in {"react", "react-dom"} and not str(dependencies.get(key)).startswith("^17.")):
+        if not dependencies.get(key):
             dependencies[key] = value
             changed = True
 
@@ -523,6 +541,7 @@ def _preview_status_payload(run_id: str, app_path) -> dict:
         "running": server_running or client_running,
         "last_install": record.get("last_install"),
         "last_build": record.get("last_build"),
+        "last_schema_setup": record.get("last_schema_setup"),
         "last_start_error": record.get("last_start_error"),
         "last_probe": record.get("last_probe"),
         "log_dir": record.get("log_dir"),
@@ -540,6 +559,11 @@ def _stop_preview_processes(record: dict) -> None:
         process = record.get(key)
         if process and process.poll() is None:
             process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def _tail_log(path, limit: int = 4000) -> str:

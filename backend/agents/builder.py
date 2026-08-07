@@ -3,6 +3,7 @@ import os
 import re
 from textwrap import dedent
 
+from backend.agents.builder_agent.agent import run_build
 from backend.agents.llm import call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, set_agent_status, write_code_files, write_text
@@ -149,20 +150,14 @@ def run_builder(state: ProjectState) -> ProjectState:
     write_text(state["run_id"], "builder_prompt.txt", state["builder_prompt"])
 
     try:
-        if use_llm_builder():
-            state["code_files"] = generate_llm_app(state)
-            state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "groq", "status": "success"})
-        else:
-            state["code_files"] = generate_internal_app(state)
-            state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "internal", "status": "template"})
+        state["code_files"] = run_build(state["architecture"], state["run_id"])
+        state.setdefault("llm_calls", []).append(
+            {"agent": "builder", "provider": "langgraph", "status": "success"}
+        )
     except Exception as exc:
-        if not allow_template_builder_fallback():
-            set_agent_status(state, "builder", "error")
-            state["fatal_error"] = True
-            raise
-        state.setdefault("errors", []).append(f"Builder used template fallback after LLM error: {exc}")
-        state["code_files"] = generate_internal_app(state)
-        state.setdefault("llm_calls", []).append({"agent": "builder", "provider": "internal", "status": "fallback"})
+        set_agent_status(state, "builder", "error")
+        state["fatal_error"] = True
+        raise
 
     write_code_files(state["run_id"], state["code_files"])
     complete_agent(state, "builder")

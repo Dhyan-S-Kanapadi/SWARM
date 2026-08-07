@@ -1,11 +1,16 @@
 import json
 import os
+from datetime import date, timedelta
 
 from backend.agents.llm import allow_fallback_for_idea, call_groq_json
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
 MAX_TOKENS = 2800
+
+
+class ArchitectureContractError(ValueError):
+    """Raised when Architect output is structurally inconsistent."""
 
 
 def run_architect(state: ProjectState) -> ProjectState:
@@ -18,9 +23,18 @@ def run_architect(state: ProjectState) -> ProjectState:
             temperature=0.25,
             max_tokens=MAX_TOKENS,
         )
+        validate_architecture_contract(state["architecture"])
         state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
+        if isinstance(exc, ArchitectureContractError):
+            state["architecture"] = fallback_architecture(state.get("requirements", {}))
+            state.setdefault("llm_calls", []).append(
+                {"agent": "architect", "provider": "groq", "status": "contract_recovered", "detail": str(exc)}
+            )
+            complete_agent(state, "architect")
+            write_json(state["run_id"], "architecture.json", state["architecture"])
+            return state
         if allow_architect_parse_fallback(exc):
             state["architecture"] = fallback_architecture(state.get("requirements", {}))
             state.setdefault("llm_calls", []).append(
@@ -137,7 +151,7 @@ def fallback_architecture(requirements: dict) -> dict:
                 },
                 "indexes": ["status", "dueDate", "customerName"],
                 "relationships": [],
-                "seed_records": requirements.get("seed_data", []),
+                "seed_records": fallback_seed_records(requirements),
             }
         },
         "api_routes": [
@@ -243,3 +257,96 @@ def fallback_architecture(requirements: dict) -> dict:
         "folder_structure": "package.json\nindex.html\nserver/\n  index.js\n  dataStore.js\n  seed-data.json\n  app.test.js\nsrc/\n  main.jsx\n  App.jsx\n  api.js\n  i18n.js\n  styles.css\nREADME.md",
         "build_constraints": ["no paid APIs", "local-first", "must pass npm run check/test/build", "responsive UI"],
     }
+
+
+def validate_architecture_contract(architecture: dict) -> None:
+    """Reject cross-field inconsistencies before Builder touches PostgreSQL."""
+
+    if not isinstance(architecture, dict):
+        raise ArchitectureContractError("architecture must be a dictionary")
+    for key in ("database_schema", "api_routes", "ui_screens"):
+        if key not in architecture:
+            raise ArchitectureContractError(f"architecture is missing {key}")
+
+    database_schema = architecture["database_schema"]
+    if not isinstance(database_schema, dict) or not database_schema:
+        raise ArchitectureContractError("database_schema must define at least one table")
+    for table_name, table in database_schema.items():
+        if not isinstance(table, dict) or not isinstance(table.get("fields"), dict):
+            raise ArchitectureContractError(f"table {table_name} must define fields")
+        fields = set(table["fields"])
+        seed_records = table.get("seed_records", [])
+        if not isinstance(seed_records, list):
+            raise ArchitectureContractError(f"table {table_name} seed_records must be a list")
+        for record in seed_records:
+            if not isinstance(record, dict):
+                raise ArchitectureContractError(f"table {table_name} seed records must be objects")
+            unknown = sorted(set(record) - fields)
+            if unknown:
+                raise ArchitectureContractError(
+                    f"table {table_name} seed record has unknown fields: {', '.join(unknown)}"
+                )
+
+    route_paths = {
+        route.get("path") for route in architecture["api_routes"] if isinstance(route, dict)
+    }
+    for screen in architecture["ui_screens"]:
+        if not isinstance(screen, dict):
+            raise ArchitectureContractError("ui_screens entries must be objects")
+        for path in screen.get("data_needed", []):
+            if path not in route_paths:
+                raise ArchitectureContractError(
+                    f"screen {screen.get('name', '(unnamed)')} needs missing API route {path}"
+                )
+
+
+def fallback_seed_records(requirements: dict) -> list[dict]:
+    """Translate Analyst seed examples into rows matching fallback work_items."""
+
+    raw_seeds = requirements.get("seed_data", [])
+    if not isinstance(raw_seeds, list):
+        return []
+
+    candidates: list[tuple[str, dict]] = []
+    for seed in raw_seeds:
+        if isinstance(seed, str):
+            candidates.append(("Demo", {"title": seed}))
+            continue
+        if not isinstance(seed, dict):
+            continue
+        nested_records = seed.get("records")
+        if isinstance(nested_records, list):
+            entity = str(seed.get("entity") or "Demo")
+            candidates.extend((entity, record) for record in nested_records if isinstance(record, dict))
+        else:
+            candidates.append((str(seed.get("entity") or "Demo"), seed))
+
+    due_date = (date.today() + timedelta(days=7)).isoformat()
+    records = []
+    for index, (entity, candidate) in enumerate(candidates[:8], start=1):
+        raw_status = str(candidate.get("status") or "new").lower()
+        status = raw_status if raw_status in {"new", "confirmed", "in_progress", "completed"} else "new"
+        customer_name = (
+            candidate.get("customerName")
+            or candidate.get("full_name")
+            or candidate.get("name")
+            or f"Demo {entity} {index}"
+        )
+        title = candidate.get("title") or candidate.get("name") or f"{entity} record"
+        candidate_due_date = candidate.get("dueDate") or candidate.get("start_time") or due_date
+        records.append(
+            {
+                "id": index,
+                "customerName": str(customer_name),
+                "phone": str(candidate.get("phone") or ""),
+                "title": str(title),
+                "category": entity.lower(),
+                "status": status,
+                "priority": "medium",
+                "dueDate": str(candidate_due_date)[:10],
+                "amount": candidate.get("amount") or candidate.get("price") or 0,
+                "notes": str(candidate.get("notes") or "Generated demo record"),
+                "language": str(candidate.get("preferred_language") or "en"),
+            }
+        )
+    return records
