@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from langgraph.graph import END, StateGraph
 
 from backend.agents.analyst import run_analyst
@@ -41,4 +43,17 @@ def build_graph():
     return graph.compile()
 
 
+def build_post_builder_graph(
+    pitcher_node: Callable[[ProjectState], ProjectState] = run_pitcher,
+):
+    """Create the continuation used after an externally submitted Builder result."""
+
+    graph = StateGraph(ProjectState)
+    graph.add_node("pitcher", _safe_node("pitcher", pitcher_node))
+    graph.set_entry_point("pitcher")
+    graph.add_edge("pitcher", END)
+    return graph.compile()
+
+
 workflow = build_graph()
+post_builder_workflow = build_post_builder_graph()

@@ -1,7 +1,7 @@
 """Generate an Express/PostgreSQL API server from an Architect route contract.
 
 The returned mapping uses the same ``{relative_path: file_content}`` shape as
-``backend.agents.builder.generate_internal_app``. It intentionally generates
+the deterministic Builder LangGraph. It intentionally generates
 only ``server/index.js``; the eventual project package manifest must include the
 Node ``pg`` dependency before the generated application is installed.
 """

@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP
 
-from backend.agents.pitcher import run_pitcher
+from backend.graph import post_builder_workflow
 from backend.state import initial_agent_statuses
 from backend.utils import (
     QUALITY_MIN_SCORE,
@@ -138,7 +138,7 @@ def submit_code_files(run_id: str, files: dict[str, str]) -> dict[str, Any]:
         }
 
     complete_agent(state, "builder")
-    state = run_pitcher(state)
+    state = post_builder_workflow.invoke(state)
     state["current_agent"] = "done"
     state["done"] = True
     state["updated_at"] = utc_now()

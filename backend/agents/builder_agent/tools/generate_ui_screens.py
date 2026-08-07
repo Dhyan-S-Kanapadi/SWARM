@@ -1,7 +1,7 @@
 """Generate architecture-driven React screens for a generated application.
 
 The functions in this module return the ``{relative_path: content}`` contract
-used by the Builder's ``generate_internal_app`` function. The generated app uses
+used by the deterministic Builder LangGraph. The generated app uses
 plain React, CSS, and the existing English/Hindi/Kannada translation object
 pattern; it does not assume a fixed record type or API surface.
 """
