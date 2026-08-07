@@ -39,6 +39,18 @@ class GraphOrchestrationTests(unittest.TestCase):
         self.assertEqual(calls, ["pitcher"])
         self.assertEqual(result["pitch_deck"], {"tagline": "Ready"})
 
+    def test_post_builder_continuation_propagates_pitcher_failures(self) -> None:
+        def failing_pitcher(_state: dict) -> dict:
+            raise RuntimeError("Pitcher unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "Pitcher unavailable"):
+            build_post_builder_graph(failing_pitcher).invoke(
+                {
+                    "run_id": "post-builder-graph-failure",
+                    "idea": "Salon booking tracker",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

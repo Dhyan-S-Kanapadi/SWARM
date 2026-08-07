@@ -46,10 +46,14 @@ def build_graph():
 def build_post_builder_graph(
     pitcher_node: Callable[[ProjectState], ProjectState] = run_pitcher,
 ):
-    """Create the continuation used after an externally submitted Builder result."""
+    """Create the continuation used after an externally submitted Builder result.
+
+    MCP callers need Pitcher failures to propagate so they can correct the
+    submission. The main workflow alone uses ``_safe_node`` to persist failures.
+    """
 
     graph = StateGraph(ProjectState)
-    graph.add_node("pitcher", _safe_node("pitcher", pitcher_node))
+    graph.add_node("pitcher", pitcher_node)
     graph.set_entry_point("pitcher")
     graph.add_edge("pitcher", END)
     return graph.compile()
