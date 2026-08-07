@@ -37,9 +37,33 @@ TASK = "Create a single Python file hello.py that prints 'OpenHands is working' 
 
 
 def main() -> int:
-    api_key = os.environ.get("GROQ_API_KEY")
+    analyst_fallbacks = os.environ.get("LLM_ANALYST_FALLBACK_MODELS", "")
+    fallback_model = next(
+        (candidate.strip() for candidate in analyst_fallbacks.split(",") if candidate.strip()),
+        "",
+    )
+    model = (
+        os.environ.get("OPENHANDS_SMOKE_MODEL")
+        or fallback_model
+        or os.environ.get("LLM_ANALYST_MODEL")
+        or "groq/openai/gpt-oss-120b"
+    )
+    base_url = os.environ.get("OPENHANDS_SMOKE_BASE_URL")
+    if model.startswith("groq/") and not base_url:
+        # The OpenHands SDK's Groq guide recommends the OpenAI-compatible
+        # endpoint for native tool calls.
+        model = f"openai/{model.removeprefix('groq/')}"
+        base_url = "https://api.groq.com/openai/v1"
+    api_key = (
+        os.environ.get("OPENHANDS_SMOKE_API_KEY")
+        or os.environ.get("LLM_ANALYST_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+    )
     if not api_key:
-        print("ERROR: GROQ_API_KEY is not set in .env")
+        print(
+            "ERROR: Set OPENHANDS_SMOKE_API_KEY, LLM_ANALYST_API_KEY, "
+            "or GROQ_API_KEY in .env"
+        )
         return 1
 
     WORKSPACE.mkdir(exist_ok=True)
@@ -48,9 +72,10 @@ def main() -> int:
     if hello_py.exists():
         hello_py.unlink()
 
-    model = os.environ.get("OPENHANDS_SMOKE_MODEL", "groq/openai/gpt-oss-120b")
     print(f"=== OpenHands smoke test ===")
     print(f"LLM: {model}")
+    if base_url:
+        print(f"LLM base URL: {base_url}")
     print(f"Workspace: {WORKSPACE}")
     print(f"Task: {TASK}")
     print("=" * 60)
@@ -58,10 +83,11 @@ def main() -> int:
     llm = LLM(
         model=model,
         api_key=api_key,
+        base_url=base_url,
         max_output_tokens=200,
         num_retries=3,
         retry_min_wait=45,
-        force_string_serializer=True,
+        reasoning_effort="none",
     )
     # Basic default agent: default system prompt, default tools (terminal,
     # file_editor, task_tracker). No custom prompt or tools.
