@@ -126,6 +126,7 @@ def write_run_summary(state: dict[str, Any]) -> None:
         "has_requirements": bool(state.get("requirements")),
         "has_architecture": bool(state.get("architecture")),
         "code_file_count": len(state.get("code_files", {})),
+        "has_openhands_build": bool(state.get("openhands_build")),
         "has_pitch_deck": bool(state.get("pitch_deck")),
     }
     write_json(str(state["run_id"]), "run_summary.json", summary)
@@ -165,6 +166,7 @@ def load_run_from_disk(run_id: str) -> ProjectState | None:
         "architecture": _read_json(root / "architecture.json") or {},
         "builder_prompt": _read_text(root / "builder_prompt.txt"),
         "code_files": read_code_files(run_id),
+        "openhands_build": _read_json(root / "openhands_build.json") or {},
         "pitch_deck": _read_json(root / "pitch_deck.json") or {},
         "current_agent": summary.get("current_agent", "unknown"),
         "agent_statuses": summary.get("agent_statuses", initial_agent_statuses()),

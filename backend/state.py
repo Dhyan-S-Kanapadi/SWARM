@@ -1,6 +1,6 @@
 from typing import Any, TypedDict
 
-AGENT_ORDER = ("analyst", "architect", "builder", "pitcher")
+AGENT_ORDER = ("analyst", "architect", "builder", "openhands", "pitcher")
 AgentStatus = str
 
 
@@ -10,6 +10,8 @@ class ProjectState(TypedDict, total=False):
     architecture: dict[str, Any]
     builder_prompt: str
     code_files: dict[str, str]
+    openhands_build: dict[str, Any]
+    openhands_review: dict[str, Any]
     pitch_deck: dict[str, Any]
     llm_calls: list[dict[str, Any]]
     fatal_error: bool

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Bot,
   BrainCircuit,
   CheckCircle2,
   CircuitBoard,
@@ -23,6 +24,7 @@ const STEPS = [
   { id: "analyst", label: "Product Analyst", icon: BrainCircuit },
   { id: "architect", label: "Software Architect", icon: CircuitBoard },
   { id: "builder", label: "SWARM Builder", icon: Code2 },
+  { id: "openhands", label: "OpenHands Builder", icon: Bot },
   { id: "pitcher", label: "Pitch Strategist", icon: Layers3 },
 ];
 
