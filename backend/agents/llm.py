@@ -337,7 +337,7 @@ def _agent_token_cap(agent_name: str, fallback: int) -> int:
 
 def _repair_token_cap(agent_name: str, token_cap: int) -> int:
     key = _agent_env_key(agent_name)
-    default_cap = min(6000, max(token_cap + 1200, round(token_cap * 1.4)))
+    default_cap = min(4800, max(token_cap + 1200, round(token_cap * 1.4)))
     configured = os.getenv(f"LLM_{key}_REPAIR_MAX_TOKENS") or os.getenv(f"GROQ_{key}_REPAIR_MAX_TOKENS")
     try:
         return max(token_cap, int(configured if configured is not None else default_cap))
@@ -398,7 +398,7 @@ def _estimate_message_tokens(messages: list[dict[str, str]]) -> int:
 
 def _reduced_max_tokens_after_413(message: str, current_max_tokens: int) -> int | None:
     lowered = message.lower()
-    if "request too large" not in lowered and "requested" not in lowered:
+    if "request too large" not in lowered:
         return None
     limit_match = re.search(r"limit\s+(\d+)", message, re.IGNORECASE)
     requested_match = re.search(r"requested\s+(\d+)", message, re.IGNORECASE)

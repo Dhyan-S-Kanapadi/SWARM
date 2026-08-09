@@ -6,7 +6,7 @@ from backend.agents.llm import allow_llm_fallback, call_llm_json, llm_provider_f
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
-MAX_TOKENS = 7000
+MAX_TOKENS = 4800
 MAX_REPAIR_ATTEMPTS = 2
 REQUIRED_ARCHITECTURE_FIELDS = {
     "tech_stack",

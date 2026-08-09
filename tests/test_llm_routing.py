@@ -7,7 +7,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.agents.llm import LLMUnavailableError, call_llm_json, llm_configuration_status
+from backend.agents.llm import (
+    LLMUnavailableError,
+    _reduced_max_tokens_after_413,
+    call_llm_json,
+    llm_configuration_status,
+)
 
 
 def _completion_response(content: str) -> SimpleNamespace:
@@ -74,6 +79,11 @@ class LiteLLMRoutingTests(unittest.TestCase):
                 max_tokens=10,
                 temperature=0.1,
             )
+
+    def test_rate_limit_message_is_not_misclassified_as_request_size_error(self) -> None:
+        message = "Rate limit reached: Limit 8000, Used 4534, Requested 7750. Please try again in 32s."
+
+        self.assertIsNone(_reduced_max_tokens_after_413(message, 4800))
 
     @patch.dict(
         os.environ,

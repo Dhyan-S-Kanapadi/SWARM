@@ -151,8 +151,11 @@ def _build_task(state: ProjectState) -> str:
         "the complete validated architecture below as the source of truth. Implement every named UI screen and primary "
         "action, use the declared API routes and PostgreSQL tables, and remove generic labels or flows that are not in "
         "the architecture. Do not replace the project with a generic CRUD dashboard, do not invent tables or APIs, and "
-        "do not modify files outside this workspace. Run the existing npm validation scripts when available. "
-        "You must make concrete source-code changes before finishing, then report the commands run and the changes made.\n\n"
+        "do not modify files outside this workspace. Inspect at most two files before editing: start with src/App.jsx "
+        "and server/index.js, then make your first concrete source edit by your third tool iteration. Do not spend "
+        "iterations repeatedly listing files or reading package metadata. Run the existing npm validation scripts when "
+        "available. You must make concrete source-code changes before finishing, then report the commands run and the "
+        "changes made.\n\n"
         f"ARCHITECTURE:\n{architecture}"
     )
 
