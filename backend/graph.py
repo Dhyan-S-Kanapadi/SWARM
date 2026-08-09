@@ -1,8 +1,11 @@
+from collections.abc import Callable
+
 from langgraph.graph import END, StateGraph
 
 from backend.agents.analyst import run_analyst
 from backend.agents.architect import run_architect
 from backend.agents.builder import run_builder
+from backend.agents.openhands_reviewer import run_openhands_builder
 from backend.agents.pitcher import run_pitcher
 from backend.state import ProjectState
 from backend.utils import append_error, write_run_summary
@@ -31,14 +34,36 @@ def build_graph():
     graph.add_node("analyst", _safe_node("analyst", run_analyst))
     graph.add_node("architect", _safe_node("architect", run_architect))
     graph.add_node("builder", _safe_node("builder", run_builder))
+    graph.add_node("openhands", _safe_node("openhands", run_openhands_builder))
     graph.add_node("pitcher", _safe_node("pitcher", run_pitcher))
 
     graph.set_entry_point("analyst")
     graph.add_edge("analyst", "architect")
     graph.add_edge("architect", "builder")
-    graph.add_edge("builder", "pitcher")
+    graph.add_edge("builder", "openhands")
+    graph.add_edge("openhands", "pitcher")
+    graph.add_edge("pitcher", END)
+    return graph.compile()
+
+
+def build_post_builder_graph(
+    pitcher_node: Callable[[ProjectState], ProjectState] = run_pitcher,
+    openhands_node: Callable[[ProjectState], ProjectState] = run_openhands_builder,
+):
+    """Create the continuation used after an externally submitted Builder result.
+
+    MCP callers need Pitcher failures to propagate so they can correct the
+    submission. The main workflow alone uses ``_safe_node`` to persist failures.
+    """
+
+    graph = StateGraph(ProjectState)
+    graph.add_node("openhands", openhands_node)
+    graph.add_node("pitcher", pitcher_node)
+    graph.set_entry_point("openhands")
+    graph.add_edge("openhands", "pitcher")
     graph.add_edge("pitcher", END)
     return graph.compile()
 
 
 workflow = build_graph()
+post_builder_workflow = build_post_builder_graph()

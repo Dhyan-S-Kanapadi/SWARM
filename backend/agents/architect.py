@@ -2,11 +2,26 @@ import json
 import os
 from datetime import date, timedelta
 
-from backend.agents.llm import allow_fallback_for_idea, call_groq_json
+from backend.agents.llm import allow_llm_fallback, call_llm_json, llm_provider_for_agent
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
 MAX_TOKENS = 2800
+MAX_REPAIR_ATTEMPTS = 2
+REQUIRED_ARCHITECTURE_FIELDS = {
+    "tech_stack",
+    "app_shell",
+    "database_schema",
+    "api_routes",
+    "ui_screens",
+    "project_modules",
+    "state_management",
+    "localization_plan",
+    "automation_jobs",
+    "validation_plan",
+    "folder_structure",
+    "build_constraints",
+}
 
 
 class ArchitectureContractError(ValueError):
@@ -14,62 +29,100 @@ class ArchitectureContractError(ValueError):
 
 
 def run_architect(state: ProjectState) -> ProjectState:
+    """Generate a build-ready architecture or fail before Builder can use it."""
+
     set_agent_status(state, "architect", "running")
     try:
-        state["architecture"] = call_groq_json(
-            agent_name="architect",
-            system_prompt=load_prompt("architect_prompt.txt"),
-            user_content=json.dumps(compact_requirements(state.get("requirements", {})), separators=(",", ":")),
-            temperature=0.25,
-            max_tokens=MAX_TOKENS,
+        requirements = compact_requirements(state.get("requirements", {}))
+        architecture, repairs = _generate_valid_architecture(requirements)
+        state["architecture"] = architecture
+        state.setdefault("llm_calls", []).append(
+            {
+                "agent": "architect",
+                "provider": llm_provider_for_agent("architect"),
+                "status": "repaired" if repairs else "success",
+                "repair_attempts": repairs,
+            }
         )
-        validate_architecture_contract(state["architecture"])
-        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "success"})
         complete_agent(state, "architect")
     except Exception as exc:
-        if isinstance(exc, ArchitectureContractError):
+        if _allow_architect_fallback():
             state["architecture"] = fallback_architecture(state.get("requirements", {}))
             state.setdefault("llm_calls", []).append(
-                {"agent": "architect", "provider": "groq", "status": "contract_recovered", "detail": str(exc)}
+                {
+                    "agent": "architect",
+                    "provider": llm_provider_for_agent("architect"),
+                    "status": "fallback",
+                    "detail": str(exc),
+                }
             )
             complete_agent(state, "architect")
-            write_json(state["run_id"], "architecture.json", state["architecture"])
-            return state
-        if allow_architect_parse_fallback(exc):
-            state["architecture"] = fallback_architecture(state.get("requirements", {}))
-            state.setdefault("llm_calls", []).append(
-                {"agent": "architect", "provider": "groq", "status": "json_recovered", "detail": "malformed_json"}
-            )
-            complete_agent(state, "architect")
-            write_json(state["run_id"], "architecture.json", state["architecture"])
-            return state
-        if not allow_fallback_for_idea(state.get("idea", "")):
+        else:
             set_agent_status(state, "architect", "error")
             state["fatal_error"] = True
-            raise
-        state.setdefault("errors", []).append(f"Architect used fallback after LLM error: {exc}")
-        state["architecture"] = fallback_architecture(state.get("requirements", {}))
-        state.setdefault("llm_calls", []).append({"agent": "architect", "provider": "groq", "status": "fallback"})
-        complete_agent(state, "architect")
+            raise RuntimeError(
+                "Architect did not produce a build-ready architecture after repair attempts: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     write_json(state["run_id"], "architecture.json", state["architecture"])
     return state
 
 
-def allow_architect_parse_fallback(exc: Exception) -> bool:
-    enabled = os.getenv("SWARM_ALLOW_ARCHITECT_PARSE_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        return False
-    message = str(exc).lower()
-    return any(
-        signal in message
-        for signal in (
-            "unterminated string",
-            "json",
-            "expecting",
-            "extra data",
-            "invalid control character",
-        )
+def _generate_valid_architecture(requirements: dict) -> tuple[dict, int]:
+    system_prompt = load_prompt("architect_prompt.txt")
+    candidate = call_llm_json(
+        agent_name="architect",
+        system_prompt=system_prompt,
+        user_content=json.dumps(requirements, separators=(",", ":")),
+        temperature=0.25,
+        max_tokens=MAX_TOKENS,
+    )
+
+    for repair_attempt in range(_repair_attempt_limit() + 1):
+        try:
+            validate_architecture_contract(candidate)
+            return candidate, repair_attempt
+        except ArchitectureContractError as exc:
+            if repair_attempt >= _repair_attempt_limit():
+                raise
+            candidate = call_llm_json(
+                agent_name="architect",
+                system_prompt=system_prompt,
+                user_content=_architecture_repair_request(requirements, candidate, str(exc)),
+                temperature=0.1,
+                max_tokens=MAX_TOKENS,
+            )
+    raise AssertionError("architecture repair loop ended unexpectedly")
+
+
+def _architecture_repair_request(requirements: dict, candidate: dict, error: str) -> str:
+    return json.dumps(
+        {
+            "task": "Repair the previous architecture. Return only the complete JSON object required by the system prompt.",
+            "validation_error": error,
+            "required_top_level_keys": sorted(REQUIRED_ARCHITECTURE_FIELDS),
+            "requirements": requirements,
+            "previous_architecture": candidate,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _repair_attempt_limit() -> int:
+    try:
+        return max(0, int(os.getenv("SWARM_ARCHITECT_REPAIR_ATTEMPTS", str(MAX_REPAIR_ATTEMPTS))))
+    except ValueError:
+        return MAX_REPAIR_ATTEMPTS
+
+
+def _allow_architect_fallback() -> bool:
+    """Permit the demo architecture only when explicitly requested for development."""
+
+    return (
+        allow_llm_fallback()
+        and os.getenv("SWARM_ALLOW_ARCHITECT_CONTRACT_FALLBACK", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
     )
 
 
@@ -260,13 +313,38 @@ def fallback_architecture(requirements: dict) -> dict:
 
 
 def validate_architecture_contract(architecture: dict) -> None:
-    """Reject cross-field inconsistencies before Builder touches PostgreSQL."""
+    """Reject incomplete or cross-field-inconsistent Architect output."""
 
     if not isinstance(architecture, dict):
         raise ArchitectureContractError("architecture must be a dictionary")
-    for key in ("database_schema", "api_routes", "ui_screens"):
-        if key not in architecture:
-            raise ArchitectureContractError(f"architecture is missing {key}")
+    missing = sorted(REQUIRED_ARCHITECTURE_FIELDS - set(architecture))
+    unexpected = sorted(set(architecture) - REQUIRED_ARCHITECTURE_FIELDS - {"auth"})
+    if missing:
+        raise ArchitectureContractError(f"architecture is missing required fields: {', '.join(missing)}")
+    if unexpected:
+        raise ArchitectureContractError(f"architecture has unsupported fields: {', '.join(unexpected)}")
+
+    _require_object_keys(architecture, "tech_stack", {"frontend", "backend", "database", "styling", "testing", "local_run_strategy"})
+    _require_object_keys(
+        architecture,
+        "app_shell",
+        {"app_name", "navigation", "primary_dashboard_widgets", "empty_states", "responsive_requirements"},
+    )
+    _require_object_keys(
+        architecture,
+        "state_management",
+        {"frontend_state", "server_state", "forms", "filters", "optimistic_updates"},
+    )
+    _require_object_keys(
+        architecture,
+        "localization_plan",
+        {"language_files", "default_locale", "locale_switching", "translated_surfaces", "formatting_rules"},
+    )
+    for key in ("project_modules", "automation_jobs", "validation_plan", "build_constraints"):
+        if not isinstance(architecture[key], list):
+            raise ArchitectureContractError(f"architecture.{key} must be a list")
+    if not isinstance(architecture["folder_structure"], str) or not architecture["folder_structure"].strip():
+        raise ArchitectureContractError("architecture.folder_structure must be a non-empty string")
 
     database_schema = architecture["database_schema"]
     if not isinstance(database_schema, dict) or not database_schema:
@@ -287,17 +365,42 @@ def validate_architecture_contract(architecture: dict) -> None:
                     f"table {table_name} seed record has unknown fields: {', '.join(unknown)}"
                 )
 
-    route_paths = {
-        route.get("path") for route in architecture["api_routes"] if isinstance(route, dict)
-    }
+    if not isinstance(architecture["api_routes"], list) or not architecture["api_routes"]:
+        raise ArchitectureContractError("api_routes must be a non-empty list")
+    route_paths = set()
+    for route in architecture["api_routes"]:
+        if not isinstance(route, dict):
+            raise ArchitectureContractError("api_routes entries must be objects")
+        route_missing = {"method", "path", "description", "request_body", "response_shape", "validation_rules"} - set(route)
+        if route_missing:
+            raise ArchitectureContractError(f"api route is missing fields: {', '.join(sorted(route_missing))}")
+        path = route["path"]
+        if not isinstance(path, str) or not path.startswith("/api/"):
+            raise ArchitectureContractError("api route paths must start with /api/")
+        route_paths.add(path)
+
+    if not isinstance(architecture["ui_screens"], list) or not architecture["ui_screens"]:
+        raise ArchitectureContractError("ui_screens must be a non-empty list")
     for screen in architecture["ui_screens"]:
         if not isinstance(screen, dict):
             raise ArchitectureContractError("ui_screens entries must be objects")
+        screen_missing = {"name", "route", "purpose", "data_needed", "primary_actions", "states"} - set(screen)
+        if screen_missing:
+            raise ArchitectureContractError(f"ui screen is missing fields: {', '.join(sorted(screen_missing))}")
         for path in screen.get("data_needed", []):
             if path not in route_paths:
                 raise ArchitectureContractError(
                     f"screen {screen.get('name', '(unnamed)')} needs missing API route {path}"
                 )
+
+
+def _require_object_keys(architecture: dict, name: str, required_keys: set[str]) -> None:
+    value = architecture.get(name)
+    if not isinstance(value, dict):
+        raise ArchitectureContractError(f"architecture.{name} must be an object")
+    missing = sorted(required_keys - set(value))
+    if missing:
+        raise ArchitectureContractError(f"architecture.{name} is missing fields: {', '.join(missing)}")
 
 
 def fallback_seed_records(requirements: dict) -> list[dict]:

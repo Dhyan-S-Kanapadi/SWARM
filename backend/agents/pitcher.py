@@ -1,6 +1,6 @@
 import json
 
-from backend.agents.llm import allow_fallback_for_idea, call_groq_json
+from backend.agents.llm import allow_fallback_for_idea, call_llm_json, llm_provider_for_agent
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -22,14 +22,14 @@ def run_pitcher(state: ProjectState) -> ProjectState:
             "quality": state.get("quality_report", {}),
             "code_files": list(state.get("code_files", {}).keys()),
         }
-        state["pitch_deck"] = call_groq_json(
+        state["pitch_deck"] = call_llm_json(
             agent_name="pitcher",
             system_prompt=load_prompt("pitcher_prompt.txt"),
             user_content=json.dumps(prior_outputs, separators=(",", ":")),
             temperature=0.3,
             max_tokens=MAX_TOKENS,
         )
-        state.setdefault("llm_calls", []).append({"agent": "pitcher", "provider": "groq", "status": "success"})
+        state.setdefault("llm_calls", []).append({"agent": "pitcher", "provider": llm_provider_for_agent("pitcher"), "status": "success"})
         complete_agent(state, "pitcher")
     except Exception as exc:
         if not allow_fallback_for_idea(state.get("idea", "")):
@@ -38,7 +38,7 @@ def run_pitcher(state: ProjectState) -> ProjectState:
             raise
         state.setdefault("errors", []).append(f"Pitcher used fallback after LLM error: {exc}")
         state["pitch_deck"] = fallback_pitch(state)
-        state.setdefault("llm_calls", []).append({"agent": "pitcher", "provider": "groq", "status": "fallback"})
+        state.setdefault("llm_calls", []).append({"agent": "pitcher", "provider": llm_provider_for_agent("pitcher"), "status": "fallback"})
         complete_agent(state, "pitcher")
 
     write_json(state["run_id"], "pitch_deck.json", state["pitch_deck"])

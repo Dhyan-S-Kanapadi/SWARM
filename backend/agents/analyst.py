@@ -1,4 +1,4 @@
-from backend.agents.llm import allow_fallback_for_idea, call_groq_json
+from backend.agents.llm import allow_fallback_for_idea, call_llm_json, llm_provider_for_agent
 from backend.state import ProjectState
 from backend.utils import complete_agent, load_prompt, set_agent_status, write_json
 
@@ -8,14 +8,14 @@ MAX_TOKENS = 1800
 def run_analyst(state: ProjectState) -> ProjectState:
     set_agent_status(state, "analyst", "running")
     try:
-        state["requirements"] = call_groq_json(
+        state["requirements"] = call_llm_json(
             agent_name="analyst",
             system_prompt=load_prompt("analyst_prompt.txt"),
             user_content=state["idea"],
             temperature=0.25,
             max_tokens=MAX_TOKENS,
         )
-        state.setdefault("llm_calls", []).append({"agent": "analyst", "provider": "groq", "status": "success"})
+        state.setdefault("llm_calls", []).append({"agent": "analyst", "provider": llm_provider_for_agent("analyst"), "status": "success"})
         complete_agent(state, "analyst")
     except Exception as exc:
         if not allow_fallback_for_idea(state.get("idea", "")):
@@ -24,7 +24,7 @@ def run_analyst(state: ProjectState) -> ProjectState:
             raise
         state.setdefault("errors", []).append(f"Analyst used fallback after LLM error: {exc}")
         state["requirements"] = fallback_requirements(state.get("idea", ""))
-        state.setdefault("llm_calls", []).append({"agent": "analyst", "provider": "groq", "status": "fallback"})
+        state.setdefault("llm_calls", []).append({"agent": "analyst", "provider": llm_provider_for_agent("analyst"), "status": "fallback"})
         complete_agent(state, "analyst")
 
     write_json(state["run_id"], "requirements.json", state["requirements"])

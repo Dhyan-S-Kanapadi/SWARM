@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.graph import workflow
-from backend.agents.llm import allow_llm_fallback, groq_configured
+from backend.agents.llm import allow_llm_fallback, groq_configured, llm_configuration_status
 from backend.state import ProjectState, initial_agent_statuses
 from backend.utils import (
     OUTPUTS_DIR,
@@ -110,6 +110,7 @@ def health() -> dict:
         "status": "ok",
         "service": "SWARM.AI backend",
         "groq_configured": groq_configured(),
+        "llm_agents": llm_configuration_status(),
         "llm_fallback_enabled": allow_llm_fallback(),
         "builder_mode": "internal",
         "outputs_dir": str(OUTPUTS_DIR),
