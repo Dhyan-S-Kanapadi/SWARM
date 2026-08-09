@@ -4,6 +4,11 @@ SWARM.AI must generate local-business applications that run locally, feel comple
 
 Return ONLY valid JSON with no markdown, no code fences, and no preamble.
 
+Keep the architecture compact enough to fit in one response: use at most 5 tables,
+12 API routes, 6 UI screens, and 3 seed records per table. Use concise descriptions
+and field names. Do not include example source code, duplicated route details, or
+long explanatory text inside JSON values.
+
 The JSON object must contain exactly these top-level keys:
 - tech_stack: object with keys frontend, backend, database, styling, testing, local_run_strategy
 - app_shell: object with keys app_name, navigation, primary_dashboard_widgets, empty_states, responsive_requirements

@@ -75,6 +75,36 @@ class LiteLLMRoutingTests(unittest.TestCase):
                 temperature=0.1,
             )
 
+    @patch.dict(
+        os.environ,
+        {
+            "LLM_ARCHITECT_MODEL": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+            "LLM_ARCHITECT_API_KEY": "nim-key",
+            "LLM_ARCHITECT_FALLBACK_MODELS": "",
+            "LLM_REQUEST_TOKEN_BUDGET": "10000",
+        },
+        clear=True,
+    )
+    @patch("backend.agents.llm.completion")
+    def test_nvidia_architect_call_enforces_json_without_thinking(self, mocked_completion) -> None:
+        mocked_completion.return_value = _completion_response('{"architecture": true}')
+
+        result = call_llm_json(
+            agent_name="architect",
+            system_prompt="Return JSON.",
+            user_content="test",
+            max_tokens=100,
+            temperature=0.1,
+        )
+
+        self.assertEqual(result, {"architecture": True})
+        kwargs = mocked_completion.call_args.kwargs
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(
+            kwargs["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

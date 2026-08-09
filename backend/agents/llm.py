@@ -38,6 +38,7 @@ _PROVIDER_KEY_ENV = {
     "azure": "AZURE_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "nvidia_nim": "NVIDIA_NIM_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "xai": "XAI_API_KEY",
@@ -143,6 +144,7 @@ def call_llm_json(
         messages=messages,
         temperature=temperature,
         max_tokens=token_cap,
+        **_json_generation_options(agent_name),
     )
 
     try:
@@ -163,7 +165,9 @@ def call_llm_json(
                 "content": (
                     f"{user_content}\n\n"
                     "Return the full corrected JSON now. Do not continue the old text. "
-                    f"Parser error from previous attempt: {parse_exc}"
+                    f"Parser error from previous attempt: {parse_exc}\n\n"
+                    "Previous invalid response follows. Correct it into one complete JSON object:\n"
+                    f"{_repairable_response_excerpt(content)}"
                 ),
             },
         ]
@@ -172,6 +176,7 @@ def call_llm_json(
             messages=repair_messages,
             temperature=0.1,
             max_tokens=repair_token_cap,
+            **_json_generation_options(agent_name),
         )
         return parse_json_response(repaired)
 
@@ -186,6 +191,8 @@ def _create_completion_with_model_fallback(
     messages: list[dict[str, str]],
     temperature: float,
     max_tokens: int,
+    response_format: dict[str, str] | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> str:
     last_error: Exception | None = None
     for candidate_model in _model_candidates(agent_name):
@@ -196,6 +203,8 @@ def _create_completion_with_model_fallback(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                response_format=response_format,
+                extra_body=extra_body,
             )
         except Exception as exc:
             last_error = exc
@@ -228,6 +237,8 @@ def _create_completion(
     messages: list[dict[str, str]],
     temperature: float,
     max_tokens: int,
+    response_format: dict[str, str] | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> str:
     fitted_max_tokens = _fit_max_tokens(messages, max_tokens)
     kwargs: dict[str, Any] = {
@@ -240,6 +251,10 @@ def _create_completion(
     }
     if api_key:
         kwargs["api_key"] = api_key
+    if response_format:
+        kwargs["response_format"] = response_format
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     try:
         response = completion(**kwargs)
     except Exception as exc:
@@ -257,6 +272,30 @@ def _create_completion(
         response = completion(**kwargs)
     content = response.choices[0].message.content
     return content if isinstance(content, str) else "{}"
+
+
+def _json_generation_options(agent_name: str) -> dict[str, Any]:
+    """Return provider-specific controls needed for valid structured output.
+
+    NVIDIA Nemotron models can emit reasoning text before their answer. JSON mode and
+    disabling that reasoning ensure Architect receives one parseable object instead.
+    Other providers retain their existing request format.
+    """
+
+    if llm_model_for_agent(agent_name).startswith("nvidia_nim/"):
+        return {
+            "response_format": {"type": "json_object"},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        }
+    return {}
+
+
+def _repairable_response_excerpt(content: str, limit: int = 24000) -> str:
+    """Keep parser repair context bounded while preserving the malformed object."""
+
+    if len(content) <= limit:
+        return content
+    return f"{content[:limit]}\n[response truncated for repair context]"
 
 
 def _api_key_for_agent(agent_name: str, model: str) -> str | None:
