@@ -59,7 +59,7 @@ def _normalise_tables(database_schema: Mapping[str, Any]) -> dict[str, dict[str,
             columns[field_name] = {
                 "required": "required" in normalized or "not null" in normalized,
                 "enum": _enum_values(normalized),
-                "text": any(word in normalized for word in ("string", "text", "uuid")),
+                "text": any(word in normalized for word in ("string", "text", "uuid", "varchar", "character varying")),
             }
             if "primary key" in normalized:
                 if primary_key:
@@ -100,7 +100,7 @@ def _normalise_routes(
             raise ValueError(f"validation_rules for '{path}' must be a list")
 
         operation = _route_operation(method, path, route["description"])
-        table_name = None if operation == "health" else _resolve_table(path, tables)
+        table_name = None if operation in {"health", "auth_login", "settings_locales"} else _resolve_table(path, tables)
         if operation in {"update", "delete", "get_one"} and not tables[table_name]["primaryKey"]:
             raise ValueError(f"route '{method} {path}' needs a table with a primary key")
 
@@ -120,17 +120,62 @@ def _normalise_routes(
                 "operation": operation,
                 "table": table_name,
                 "bodyFields": body_fields,
+                "derivedFields": _derived_fields(route["validation_rules"], tables.get(table_name, {}).get("columns", {})),
                 "validationRules": [str(rule) for rule in route["validation_rules"]],
                 "responseShape": route["response_shape"],
             }
         )
+    if not any(route["method"] == "GET" and route["path"] == "/api/health" for route in normalised):
+        normalised.insert(
+            0,
+            {
+                "method": "GET",
+                "path": "/api/health",
+                "description": "Generated application health check",
+                "operation": "health",
+                "table": None,
+                "bodyFields": [],
+                "derivedFields": {},
+                "validationRules": [],
+                "responseShape": {"ok": True},
+            },
+        )
     return normalised
+
+
+def _derived_fields(rules: Sequence[Any], columns: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Translate deterministic date arithmetic rules into API defaults.
+
+    Architect commonly describes a calculated due date as ``due_date =
+    loan_date+14``. The client should not have to invent that field, so the
+    generated server calculates it before inserting the row.
+    """
+
+    derived: dict[str, dict[str, Any]] = {}
+    for rule in rules:
+        match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(\d+)\b", str(rule))
+        if not match:
+            continue
+        field, source, days = match.groups()
+        if field in columns and source in columns:
+            derived[field] = {"source": source, "days": int(days)}
+    return derived
 
 
 def _route_operation(method: str, path: str, description: Any) -> str:
     description_text = str(description).lower()
     if path == "/api/health" or "health check" in description_text:
         return "health"
+    if path == "/api/auth/login" and method == "POST":
+        return "auth_login"
+    if path == "/api/settings/locales" and method == "GET":
+        return "settings_locales"
+    if path.rstrip("/").endswith("/overdue") and method == "GET":
+        return "list_overdue"
+    if path.rstrip("/").endswith("/return") and method in {"PUT", "PATCH"}:
+        return "return_record"
+    if path.rstrip("/").endswith("/read") and method in {"PUT", "PATCH"}:
+        return "mark_read"
     if "metric" in path.lower() or "metric" in description_text:
         return "metrics"
     has_id = ":" in path
@@ -147,9 +192,12 @@ def _resolve_table(path: str, tables: Mapping[str, Mapping[str, Any]]) -> str:
     if len(tables) == 1:
         return next(iter(tables))
 
-    segments = [segment for segment in path.lower().split("/") if segment and not segment.startswith(":")]
-    resource = segments[-1] if segments else ""
-    candidates = [table_name for table_name in tables if _table_matches_resource(table_name, resource)]
+    segments = [segment for segment in path.lower().split("/") if segment and segment != "api" and not segment.startswith(":")]
+    candidates = [
+        table_name
+        for table_name in tables
+        if any(_table_matches_resource(table_name, segment) for segment in segments)
+    ]
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
@@ -278,6 +326,14 @@ async function createRow(route, req, res) {
   if (validationError) return res.status(400).json({ error: validationError });
 
   const payload = { ...req.body };
+  for (const [field, definition] of Object.entries(route.derivedFields || {})) {
+    if (payload[field] === undefined) {
+      const base = payload[definition.source] ? new Date(payload[definition.source]) : new Date();
+      if (Number.isNaN(base.getTime())) return res.status(400).json({ error: `${definition.source} must be a valid date` });
+      base.setUTCDate(base.getUTCDate() + definition.days);
+      payload[field] = base.toISOString().slice(0, 10);
+    }
+  }
   if (table.primaryKey && payload[table.primaryKey] === undefined) {
     const nextId = await pool.query(
       `SELECT COALESCE(MAX(${quoteIdentifier(table.primaryKey)}), 0) + 1 AS value FROM ${quoteIdentifier(route.table)}`
@@ -336,6 +392,30 @@ async function getMetrics(route, _req, res) {
   return res.json(result.rows[0]);
 }
 
+async function listOverdue(route, _req, res) {
+  const table = tables[route.table];
+  if (!table.columns.overdue || !table.columns.returned) {
+    return res.status(501).json({ error: "The overdue route requires overdue and returned columns" });
+  }
+  const result = await pool.query(
+    `SELECT * FROM ${quoteIdentifier(route.table)} WHERE "overdue" = TRUE AND "returned" = FALSE ORDER BY ${quoteIdentifier(table.primaryKey)}`
+  );
+  return res.json(result.rows);
+}
+
+async function setBooleanFlag(route, req, res, field) {
+  const table = tables[route.table];
+  if (!table.primaryKey || !table.columns[field]) {
+    return res.status(501).json({ error: `The route requires a ${field} column and primary key` });
+  }
+  const result = await pool.query(
+    `UPDATE ${quoteIdentifier(route.table)} SET ${quoteIdentifier(field)} = TRUE WHERE ${quoteIdentifier(table.primaryKey)} = $1 RETURNING *`,
+    [req.params.id]
+  );
+  if (!result.rowCount) return res.status(404).json({ error: "Record not found" });
+  return res.json(result.rows[0]);
+}
+
 for (const route of routes) {
   app[route.method.toLowerCase()](route.path, async (req, res) => {
     try {
@@ -346,6 +426,11 @@ for (const route of routes) {
       if (route.operation === "update") return await updateRow(route, req, res);
       if (route.operation === "delete") return await deleteRow(route, req, res);
       if (route.operation === "metrics") return await getMetrics(route, req, res);
+      if (route.operation === "list_overdue") return await listOverdue(route, req, res);
+      if (route.operation === "return_record") return await setBooleanFlag(route, req, res, "returned");
+      if (route.operation === "mark_read") return await setBooleanFlag(route, req, res, "read");
+      if (route.operation === "settings_locales") return res.json({ supported: ["en", "hi", "kn"], current: "en" });
+      if (route.operation === "auth_login") return res.status(501).json({ error: "Authentication requires scaffold_auth configuration" });
       return res.status(501).json({ error: "Route operation is not implemented" });
     } catch (error) {
       return sendDatabaseError(error, res);

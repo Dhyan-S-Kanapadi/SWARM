@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from backend.agents.llm import (
     LLMUnavailableError,
+    _repair_token_cap,
     _reduced_max_tokens_after_413,
     call_llm_json,
     llm_configuration_status,
@@ -84,6 +85,10 @@ class LiteLLMRoutingTests(unittest.TestCase):
         message = "Rate limit reached: Limit 8000, Used 4534, Requested 7750. Please try again in 32s."
 
         self.assertIsNone(_reduced_max_tokens_after_413(message, 4800))
+
+    @patch.dict(os.environ, {"LLM_ARCHITECT_REPAIR_MAX_TOKENS": "4200"}, clear=True)
+    def test_explicit_repair_token_cap_can_be_lower_than_initial_generation(self) -> None:
+        self.assertEqual(_repair_token_cap("architect", 4800), 4200)
 
     @patch.dict(
         os.environ,

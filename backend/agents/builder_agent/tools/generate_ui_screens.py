@@ -73,6 +73,7 @@ def _normalise_routes(api_routes: Sequence[Mapping[str, Any]]) -> list[dict[str,
                 "description": str(route["description"]),
                 "requestBody": dict(route["request_body"] or {}),
                 "responseShape": route["response_shape"],
+                "isCollection": _is_collection_shape(route["response_shape"]),
                 "validationRules": [str(rule) for rule in route["validation_rules"]],
             }
         )
@@ -117,6 +118,8 @@ def _normalise_screens(
             raise ValueError(f"primary_actions for screen '{name}' must be a list of strings")
         if not isinstance(states, list) or not all(isinstance(state, str) for state in states):
             raise ValueError(f"states for screen '{name}' must be a list of strings")
+        resource_path = _screen_resource_path(route, name, data_needed, routes)
+        create_path = _screen_create_path(route, name, routes)
         screens.append(
             {
                 "name": name,
@@ -125,9 +128,50 @@ def _normalise_screens(
                 "dataNeeded": data_needed,
                 "primaryActions": actions,
                 "states": states,
+                "resourcePath": resource_path,
+                "createPath": create_path,
             }
         )
     return screens
+
+
+def _is_collection_shape(response_shape: Any) -> bool:
+    """Accept both JSON collections and Architect's common ``"[{...}]"`` shorthand."""
+
+    return isinstance(response_shape, list) or (
+        isinstance(response_shape, str) and response_shape.lstrip().startswith("[")
+    )
+
+
+def _screen_resource_path(
+    screen_route: str, name: str, data_needed: Sequence[str], routes: Sequence[Mapping[str, Any]]
+) -> str | None:
+    """Find the collection route represented by a screen, if it has one."""
+
+    collection_paths = {
+        route["path"] for route in routes if route["method"] == "GET" and route.get("isCollection")
+    }
+    direct = next((path for path in data_needed if path in collection_paths), None)
+    if direct:
+        return direct
+    return _api_path_for_screen(screen_route, name, [route for route in routes if route["method"] == "GET"])
+
+
+def _screen_create_path(screen_route: str, name: str, routes: Sequence[Mapping[str, Any]]) -> str | None:
+    return _api_path_for_screen(screen_route, name, [route for route in routes if route["method"] == "POST"])
+
+
+def _api_path_for_screen(screen_route: str, name: str, routes: Sequence[Mapping[str, Any]]) -> str | None:
+    screen_segments = {segment.lower() for segment in screen_route.split("/") if segment and segment != "new"}
+    name_tokens = {token.lower() for token in name.replace("Form", "").replace("_", " ").split()}
+    candidates = []
+    for route in routes:
+        path = route["path"]
+        segments = [segment for segment in path.split("/") if segment and segment != "api" and not segment.startswith(":")]
+        resource = segments[0] if segments else ""
+        if resource in screen_segments or resource.rstrip("s") in name_tokens or resource in name_tokens:
+            candidates.append(path)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _i18n_source(screens: Sequence[Mapping[str, Any]]) -> str:
@@ -245,10 +289,11 @@ function Screen({ screen, locale, t }) {
   const [form, setForm] = useState(null);
   const [editing, setEditing] = useState(null);
   const actions = screen.primaryActions.map((action) => action.toLowerCase());
+  const hasAction = (keywords) => actions.some((action) => keywords.some((keyword) => action.includes(keyword)));
   const dataRoutes = screen.dataNeeded.map((path) => config.apiRoutes.find((route) => route.method === "GET" && route.path === path));
-  const collectionRoute = dataRoutes.find((route) => route && Array.isArray(route.responseShape));
-  const resourcePath = collectionRoute?.path;
-  const createRoute = config.apiRoutes.find((route) => route.method === "POST" && route.path === resourcePath);
+  const collectionRoute = dataRoutes.find((route) => route && route.isCollection);
+  const resourcePath = screen.resourcePath || collectionRoute?.path;
+  const createRoute = config.apiRoutes.find((route) => route.method === "POST" && route.path === (screen.createPath || resourcePath));
   const updateRoute = config.apiRoutes.find((route) => (route.method === "PUT" || route.method === "PATCH") && route.path.startsWith(`${resourcePath}/:`));
   const deleteRoute = config.apiRoutes.find((route) => route.method === "DELETE" && route.path.startsWith(`${resourcePath}/:`));
 
@@ -329,17 +374,17 @@ function Screen({ screen, locale, t }) {
             <h2>{t.data}</h2>
             <span>{loading ? t.loading : `${filteredRecords.length} ${t.records.toLowerCase()}`}</span>
           </div>
-          {(actions.includes("search") || actions.includes("filter")) && (
+          {hasAction(["search", "filter"]) && (
             <div className="filters">
               <input placeholder={t.search} value={search} onChange={(event) => setSearch(event.target.value)} />
             </div>
           )}
           {loading ? <div className="empty">{t.loading}</div> : (
-            <DataViews data={data} records={filteredRecords} locale={locale} emptyLabel={t.empty} onEdit={actions.includes("edit") ? startEdit : null} onDelete={actions.includes("delete") ? remove : null} />
+            <DataViews data={data} records={filteredRecords} locale={locale} emptyLabel={t.empty} onEdit={hasAction(["edit"]) ? startEdit : null} onDelete={hasAction(["delete"]) ? remove : null} />
           )}
         </section>
 
-        {(actions.includes("create") || form) && createRoute && (
+        {(hasAction(["add", "create", "register", "submit", "new"]) || form) && createRoute && (
           <section className="panel form-panel">
             <div className="section-title">
               <h2>{editing ? t.edit : t.create}</h2>

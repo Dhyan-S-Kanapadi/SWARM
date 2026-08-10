@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import date, timedelta
 
 from backend.agents.llm import allow_llm_fallback, call_llm_json, llm_provider_for_agent
@@ -81,6 +82,7 @@ def _generate_valid_architecture(requirements: dict) -> tuple[dict, int]:
 
     for repair_attempt in range(_repair_attempt_limit() + 1):
         try:
+            candidate = complete_known_contract_defaults(candidate)
             validate_architecture_contract(candidate)
             return candidate, repair_attempt
         except ArchitectureContractError as exc:
@@ -89,20 +91,146 @@ def _generate_valid_architecture(requirements: dict) -> tuple[dict, int]:
             candidate = call_llm_json(
                 agent_name="architect",
                 system_prompt=system_prompt,
-                user_content=_architecture_repair_request(requirements, candidate, str(exc)),
+                user_content=_architecture_repair_request(candidate, str(exc)),
                 temperature=0.1,
                 max_tokens=MAX_TOKENS,
             )
     raise AssertionError("architecture repair loop ended unexpectedly")
 
 
-def _architecture_repair_request(requirements: dict, candidate: dict, error: str) -> str:
+def complete_known_contract_defaults(candidate: dict) -> dict:
+    """Fill stable implementation metadata that does not change the product design.
+
+    Some hosted models omit individual ``state_management`` subkeys while
+    otherwise returning a complete domain architecture. These defaults describe
+    the existing React/Express generation pattern and avoid an unnecessary
+    second LLM call solely for generic implementation metadata.
+    """
+
+    if not isinstance(candidate, dict):
+        return candidate
+    completed = dict(candidate)
+    schema = completed.get("database_schema")
+    if isinstance(schema, dict) and isinstance(schema.get("tables"), list):
+        table_map = {}
+        for table in schema["tables"]:
+            if not isinstance(table, dict):
+                continue
+            table_name = table.get("name") or table.get("table_name")
+            if not isinstance(table_name, str) or not table_name:
+                continue
+            table_map[table_name] = {
+                key: value
+                for key, value in table.items()
+                if key not in {"name", "table_name"}
+            }
+        if table_map:
+            completed["database_schema"] = table_map
+
+    routes = completed.get("api_routes")
+    screens = completed.get("ui_screens")
+    if isinstance(routes, list):
+        normalized_routes = []
+        for route in routes:
+            if not isinstance(route, dict):
+                normalized_routes.append(route)
+                continue
+            rules = route.get("validation_rules")
+            if rules is None:
+                rules = []
+            elif isinstance(rules, str):
+                rules = [rules]
+            elif not isinstance(rules, list):
+                rules = [str(rules)]
+            normalized_routes.append(
+                {
+                    **route,
+                    "request_body": _normalise_request_body(route.get("request_body")),
+                    "validation_rules": rules,
+                }
+            )
+        completed["api_routes"] = normalized_routes
+        routes = completed["api_routes"]
+
+        # An auth endpoint is an explicit product requirement, not a reason to
+        # speculate. Complete the omitted flag so the deterministic Builder
+        # installs its session middleware and UI consistently.
+        if "auth" not in completed and any(
+            isinstance(route, dict) and str(route.get("path", "")).startswith("/api/auth/")
+            for route in routes
+        ):
+            completed["auth"] = {"required": True}
+
+    if isinstance(routes, list) and isinstance(screens, list):
+        route_paths = {
+            route.get("path")
+            for route in routes
+            if isinstance(route, dict) and isinstance(route.get("path"), str)
+        }
+        read_paths = [
+            route["path"]
+            for route in routes
+            if isinstance(route, dict) and route.get("method", "").upper() == "GET"
+            and route.get("path") in route_paths
+        ]
+        normalized_screens = []
+        for screen in screens:
+            if not isinstance(screen, dict):
+                normalized_screens.append(screen)
+                continue
+            data_needed = screen.get("data_needed")
+            valid_paths = [path for path in data_needed if path in route_paths] if isinstance(data_needed, list) else []
+            normalized_screens.append(
+                {
+                    **screen,
+                    "data_needed": valid_paths or read_paths,
+                }
+            )
+        completed["ui_screens"] = normalized_screens
+
+    if not isinstance(completed.get("state_management"), dict):
+        return completed
+    defaults = {
+        "frontend_state": ["screen data", "forms", "filters", "locale", "loading", "error"],
+        "server_state": "PostgreSQL data accessed through declared API routes",
+        "forms": "controlled forms validate fields declared by the architecture",
+        "filters": "screen filters map to declared API query parameters",
+        "optimistic_updates": "refetch route data after successful mutations",
+    }
+    completed["state_management"] = {**defaults, **completed["state_management"]}
+    return completed
+
+
+def _normalise_request_body(value):
+    """Convert a model's ``{field_one, field_two}`` shorthand to an object."""
+
+    if value is None or isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.lower() in {"", "null", "none"}:
+        return None
+    if not (text.startswith("{") and text.endswith("}")):
+        return value
+    fields = [item.strip().rstrip("?").replace(" ", "_") for item in text[1:-1].split(",")]
+    if not fields or not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field) for field in fields):
+        return value
+    return {field: "string" for field in fields}
+
+
+def _architecture_repair_request(candidate: dict, error: str) -> str:
+    """Request a contract repair without duplicating the original requirements.
+
+    The candidate already contains the proposed architecture. Re-sending requirements
+    can push a repair request over smaller hosted-model TPM limits.
+    """
+
     return json.dumps(
         {
             "task": "Repair the previous architecture. Return only the complete JSON object required by the system prompt.",
             "validation_error": error,
             "required_top_level_keys": sorted(REQUIRED_ARCHITECTURE_FIELDS),
-            "requirements": requirements,
             "previous_architecture": candidate,
         },
         separators=(",", ":"),
@@ -378,6 +506,16 @@ def validate_architecture_contract(architecture: dict) -> None:
         if not isinstance(path, str) or not path.startswith("/api/"):
             raise ArchitectureContractError("api route paths must start with /api/")
         route_paths.add(path)
+
+    auth_config = architecture.get("auth")
+    auth_route_declared = any(path.startswith("/api/auth/") for path in route_paths)
+    auth_required = auth_config is True or (
+        isinstance(auth_config, dict) and auth_config.get("required") is True
+    )
+    if auth_config is not None and not isinstance(auth_config, (bool, dict)):
+        raise ArchitectureContractError("architecture.auth must be a boolean or object")
+    if auth_route_declared and not auth_required:
+        raise ArchitectureContractError("auth API routes require auth.required to be true")
 
     if not isinstance(architecture["ui_screens"], list) or not architecture["ui_screens"]:
         raise ArchitectureContractError("ui_screens must be a non-empty list")

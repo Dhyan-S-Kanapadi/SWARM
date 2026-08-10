@@ -12,6 +12,8 @@ from backend.agents.architect import fallback_architecture, validate_architectur
 from backend.agents.builder import run_builder
 from backend.agents.builder_agent.agent import run_build
 from backend.agents.builder_agent.database import database_url_for_namespace
+from backend.agents.builder_agent.tools.generate_ui_screens import generate_ui_screens
+from backend.agents.builder_agent.tools.generate_api_routes import generate_api_routes
 
 
 RUNNABLE_FILES = {
@@ -133,6 +135,75 @@ class BuilderAgentTests(unittest.TestCase):
 
         self.assertIn("options=-c%20search_path%3Dswarm_test_run", scoped)
         self.assertNotIn("+search_path", scoped)
+
+    def test_ui_generator_recognises_architect_collection_shorthand_and_action_labels(self) -> None:
+        files = generate_ui_screens(
+            [
+                {
+                    "name": "LoanForm",
+                    "route": "/loans/new",
+                    "purpose": "Create a loan",
+                    "data_needed": ["/api/books", "/api/members"],
+                    "primary_actions": ["Submit Loan", "Cancel"],
+                    "states": ["idle", "success"],
+                }
+            ],
+            [
+                {"method": "GET", "path": "/api/books", "description": "Books", "request_body": None, "response_shape": "[{id, title}]", "validation_rules": []},
+                {"method": "GET", "path": "/api/members", "description": "Members", "request_body": None, "response_shape": "[{id, name}]", "validation_rules": []},
+                {"method": "POST", "path": "/api/loans", "description": "Create loan", "request_body": {"book_id": "number", "member_id": "number"}, "response_shape": "{id}", "validation_rules": []},
+            ],
+        )
+
+        self.assertIn('"createPath": "/api/loans"', files["src/App.jsx"])
+        self.assertIn('"isCollection": true', files["src/App.jsx"])
+        self.assertIn('hasAction(["add", "create", "register", "submit", "new"])', files["src/App.jsx"])
+
+    def test_api_generator_derives_date_fields_from_architecture_rules(self) -> None:
+        server = generate_api_routes(
+            [
+                {
+                    "method": "POST",
+                    "path": "/api/loans",
+                    "description": "Create loan",
+                    "request_body": {"book_id": "number", "member_id": "number"},
+                    "response_shape": {"id": "number"},
+                    "validation_rules": ["due_date = loan_date+14"],
+                }
+            ],
+            {
+                "loans": {
+                    "fields": {
+                        "id": "SERIAL PRIMARY KEY",
+                        "book_id": "INTEGER NOT NULL",
+                        "member_id": "INTEGER NOT NULL",
+                        "loan_date": "DATE NOT NULL DEFAULT CURRENT_DATE",
+                        "due_date": "DATE NOT NULL",
+                    }
+                }
+            },
+        )["server/index.js"]
+
+        self.assertIn('"derivedFields": {', server)
+        self.assertIn('"due_date": {', server)
+        self.assertIn('base.setUTCDate(base.getUTCDate() + definition.days)', server)
+
+    def test_api_generator_adds_preview_health_route_when_architecture_omits_it(self) -> None:
+        server = generate_api_routes(
+            [
+                {
+                    "method": "GET",
+                    "path": "/api/items",
+                    "description": "List items",
+                    "request_body": None,
+                    "response_shape": [],
+                    "validation_rules": [],
+                }
+            ],
+            {"items": {"fields": {"id": "integer primary key"}}},
+        )["server/index.js"]
+
+        self.assertIn('"path": "/api/health"', server)
 
 
 if __name__ == "__main__":

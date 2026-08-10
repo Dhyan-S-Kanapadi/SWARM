@@ -21,6 +21,13 @@ The JSON object must contain exactly these top-level keys:
 - seed_data: array of realistic demo records the builder can use
 - acceptance_criteria: array of testable statements that prove the MVP works
 
+Keep the brief compact enough to complete within one response: return exactly 2
+personas, at most 6 core features, at most 6 user stories, at most 3 workflows,
+at most 3 data entities, at most 5 business rules, at most 2 automation jobs,
+at most 4 seed records, and at most 4 acceptance criteria. Keep every string
+under 120 characters where possible. Do not repeat the same requirement in
+multiple fields or include explanatory prose outside the JSON values.
+
 Rules:
 - Assume the end user may not know English well. Include local-language UX requirements whenever the idea or audience suggests it.
 - Make the product dynamic: every major feature should create, read, update, delete, filter, or calculate real data.

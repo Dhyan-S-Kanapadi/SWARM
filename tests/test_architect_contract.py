@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 from unittest.mock import patch
 
-from backend.agents.architect import fallback_architecture, run_architect
+from backend.agents.architect import (
+    complete_known_contract_defaults,
+    fallback_architecture,
+    run_architect,
+    validate_architecture_contract,
+)
 
 
 class ArchitectContractTests(unittest.TestCase):
@@ -35,6 +41,9 @@ class ArchitectContractTests(unittest.TestCase):
         self.assertEqual(result["llm_calls"][-1]["status"], "repaired")
         self.assertEqual(result["llm_calls"][-1]["repair_attempts"], 1)
         self.assertEqual(call_llm.call_count, 2)
+        repair_payload = json.loads(call_llm.call_args_list[1].kwargs["user_content"])
+        self.assertNotIn("requirements", repair_payload)
+        self.assertEqual(repair_payload["previous_architecture"], {"tech_stack": {}})
 
     @patch("backend.agents.architect.write_json")
     @patch("backend.agents.architect.load_prompt", return_value="architecture prompt")
@@ -58,6 +67,82 @@ class ArchitectContractTests(unittest.TestCase):
 
         self.assertEqual(state["agent_statuses"]["architect"], "error")
         self.assertNotIn("architecture", state)
+
+    def test_known_state_management_metadata_is_completed_without_llm_repair(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["state_management"] = {"forms": "controlled form"}
+
+        completed = complete_known_contract_defaults(architecture)
+
+        validate_architecture_contract(completed)
+        self.assertEqual(completed["state_management"]["forms"], "controlled form")
+        self.assertIn("frontend_state", completed["state_management"])
+
+    def test_database_table_array_is_normalized_to_builder_schema_map(self) -> None:
+        architecture = fallback_architecture({})
+        work_items = architecture["database_schema"]["work_items"]
+        architecture["database_schema"] = {
+            "tables": [{"name": "work_items", **work_items}]
+        }
+
+        completed = complete_known_contract_defaults(architecture)
+
+        self.assertEqual(completed["database_schema"], {"work_items": work_items})
+        validate_architecture_contract(completed)
+
+    def test_screen_data_labels_are_replaced_with_declared_read_routes(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["ui_screens"][0]["data_needed"] = ["record counts"]
+
+        completed = complete_known_contract_defaults(architecture)
+
+        self.assertEqual(completed["ui_screens"][0]["data_needed"], ["/api/health", "/api/items", "/api/metrics"])
+        validate_architecture_contract(completed)
+
+    def test_route_validation_rule_string_is_normalized_to_a_list(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"][1]["validation_rules"] = "status query is optional"
+
+        completed = complete_known_contract_defaults(architecture)
+
+        self.assertEqual(completed["api_routes"][1]["validation_rules"], ["status query is optional"])
+
+    def test_missing_route_validation_rules_are_normalized_to_an_empty_list(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"][1]["validation_rules"] = None
+
+        completed = complete_known_contract_defaults(architecture)
+
+        self.assertEqual(completed["api_routes"][1]["validation_rules"], [])
+
+    def test_auth_route_enables_explicit_builder_auth_configuration(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"].append(
+            {
+                "method": "POST",
+                "path": "/api/auth/login",
+                "description": "Log in",
+                "request_body": {"email": "string", "password": "string"},
+                "response_shape": {"user": "object"},
+                "validation_rules": [],
+            }
+        )
+
+        completed = complete_known_contract_defaults(architecture)
+        validate_architecture_contract(completed)
+
+        self.assertEqual(completed["auth"], {"required": True})
+
+    def test_route_body_field_shorthand_is_normalized_to_an_object(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"][2]["request_body"] = "{customerName, title?, dueDate}"
+
+        completed = complete_known_contract_defaults(architecture)
+
+        self.assertEqual(
+            completed["api_routes"][2]["request_body"],
+            {"customerName": "string", "title": "string", "dueDate": "string"},
+        )
 
 
 if __name__ == "__main__":

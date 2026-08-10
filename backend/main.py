@@ -276,6 +276,12 @@ def _start_preview_processes(run_id: str, app_path) -> dict:
     env = os.environ.copy()
     env["PORT"] = "3001"
     env["VITE_API_BASE_URL"] = "http://127.0.0.1:3001"
+    architecture = _get_run(run_id).get("architecture", {})
+    auth_config = architecture.get("auth") if isinstance(architecture, dict) else None
+    if auth_config is True or (isinstance(auth_config, dict) and auth_config.get("required") is True):
+        secret_name = auth_config.get("session_secret_env", "SESSION_SECRET") if isinstance(auth_config, dict) else "SESSION_SECRET"
+        if isinstance(secret_name, str) and secret_name.isidentifier():
+            env.setdefault(secret_name, "swarm-preview-local-session-secret")
 
     log_dir = app_path / ".swarm-preview"
     log_dir.mkdir(parents=True, exist_ok=True)

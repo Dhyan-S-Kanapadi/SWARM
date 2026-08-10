@@ -217,6 +217,9 @@ const schema = __DATABASE_SCHEMA__;
 const namespace = "__DATABASE_NAMESPACE__";
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const typeMap = {
+  serial: "SERIAL",
+  bigserial: "BIGSERIAL",
+  varchar: "TEXT",
   integer: "INTEGER",
   int: "INTEGER",
   bigint: "BIGINT",
@@ -250,14 +253,38 @@ function fieldSql(fieldName, declaration) {
     const choices = values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", ");
     sqlType = `TEXT CHECK (${quoteIdentifier(fieldName)} IN (${choices}))`;
   } else {
+    const varchar = normalized.match(/\b(?:varchar|character varying)\s*\(\s*(\d+)\s*\)/);
     const type = Object.keys(typeMap).find((candidate) => new RegExp(`\\b${candidate}\\b`).test(normalized));
     if (!type) throw new Error(`Unsupported field declaration for ${fieldName}: ${declaration}`);
-    sqlType = typeMap[type];
+    sqlType = varchar ? `VARCHAR(${varchar[1]})` : typeMap[type];
   }
   if (normalized.includes("primary key")) sqlType += " PRIMARY KEY";
   if (normalized.includes("required") || normalized.includes("not null")) sqlType += " NOT NULL";
   if (normalized.includes("unique")) sqlType += " UNIQUE";
+  const defaultMatch = normalized.match(/\bdefault\s+(.+?)(?=\s+(?:references|on\s+delete|check)\b|$)/);
+  if (defaultMatch) {
+    const value = defaultMatch[1].trim();
+    if (!/^(current_date|current_timestamp|true|false|[-+]?\d+(?:\.\d+)?|'[^']*')$/.test(value)) {
+      throw new Error(`Unsupported default for ${fieldName}: ${value}`);
+    }
+    sqlType += ` DEFAULT ${value.toUpperCase()}`;
+  }
+  const referenceMatch = normalized.match(/\breferences\s+([a-z_][a-z0-9_]*)\s*\(\s*([a-z_][a-z0-9_]*)\s*\)(\s+on\s+delete\s+(?:restrict|cascade|set null))?/);
+  if (referenceMatch) {
+    const [, tableName, referencedField, onDelete = ""] = referenceMatch;
+    sqlType += ` REFERENCES ${quoteIdentifier(tableName)}(${quoteIdentifier(referencedField)})${onDelete.toUpperCase()}`;
+  }
+  const checkMatch = normalized.match(/\bcheck\s*(\([a-z_][a-z0-9_]*\s+in\s+\([^)]*\)\))/);
+  if (checkMatch) sqlType += ` CHECK ${checkMatch[1]}`;
   return sqlType;
+}
+
+function indexParts(specification, tableName) {
+  const match = String(specification).trim().match(/(?:(UNIQUE|INDEX)\s*\(\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\)?$/i);
+  if (!match) throw new Error(`Unsupported index declaration for ${tableName}: ${specification}`);
+  const [, kind = "", fieldName] = match;
+  quoteIdentifier(fieldName);
+  return { fieldName, unique: kind.toUpperCase() === "UNIQUE" };
 }
 
 function relationshipParts(relationship) {
@@ -294,13 +321,15 @@ async function setupDatabase() {
       await client.query(`CREATE TABLE IF NOT EXISTS ${quoteIdentifier(tableName)} (${columns.join(", ")})`);
     }
     for (const [tableName, table] of Object.entries(schema)) {
-      for (const fieldName of table.indexes || []) {
+      for (const indexSpecification of table.indexes || []) {
+        const { fieldName, unique } = indexParts(indexSpecification, tableName);
         const indexName = `idx_${tableName}_${fieldName}`.slice(0, 63);
         await client.query(
-          `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(indexName)} ON ${quoteIdentifier(tableName)} (${quoteIdentifier(fieldName)})`,
+          `CREATE ${unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdentifier(indexName)} ON ${quoteIdentifier(tableName)} (${quoteIdentifier(fieldName)})`,
         );
       }
-      for (const relationship of table.relationships || []) {
+      const relationships = Array.isArray(table.relationships) ? table.relationships : [];
+      for (const relationship of relationships) {
         const { localField, referencedTable, referencedField } = relationshipParts(relationship);
         const constraintName = `fk_${tableName}_${localField}`.slice(0, 63);
         await client.query(`DO $$ BEGIN ALTER TABLE ${quoteIdentifier(tableName)} ADD CONSTRAINT ${quoteIdentifier(constraintName)} FOREIGN KEY (${quoteIdentifier(localField)}) REFERENCES ${quoteIdentifier(referencedTable)} (${quoteIdentifier(referencedField)}); EXCEPTION WHEN duplicate_object THEN NULL; END $$`);

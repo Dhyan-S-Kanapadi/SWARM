@@ -27,6 +27,9 @@ except ImportError:  # pragma: no cover - exercised only without dependencies in
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TYPE_MAP = {
+    "serial": "SERIAL",
+    "bigserial": "BIGSERIAL",
+    "varchar": "TEXT",
     "integer": "INTEGER",
     "int": "INTEGER",
     "bigint": "BIGINT",
@@ -133,21 +136,27 @@ def _build_schema_statements(
             )
         )
 
-        for index_field in table_spec.get("indexes", []):
-            _validate_identifier(index_field, f"index field for table '{table_name}'")
+        for index_specification in table_spec.get("indexes", []):
+            index_field, unique = _index_parts(index_specification, table_name)
             if index_field not in fields:
                 raise ValueError(f"index field '{index_field}' is not defined on table '{table_name}'")
             index_name = _index_name(table_name, index_field)
             index_statements.append(
                 (
                     table_name,
-                    sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} ({})").format(
+                    sql.SQL("CREATE {}INDEX IF NOT EXISTS {} ON {} ({})").format(
+                        sql.SQL("UNIQUE ") if unique else sql.SQL(""),
                         sql.Identifier(index_name), sql.Identifier(table_name), sql.Identifier(index_field)
                     ),
                 )
             )
 
-        for relationship in table_spec.get("relationships", []):
+        relationships = table_spec.get("relationships", [])
+        # Architect may include a descriptive relationship map while expressing
+        # the executable foreign keys inline in the field declaration.
+        if isinstance(relationships, Mapping):
+            relationships = []
+        for relationship in relationships:
             local_field, referenced_table, referenced_field = _relationship_parts(table_name, relationship)
             if local_field not in fields:
                 raise ValueError(f"relationship field '{local_field}' is not defined on table '{table_name}'")
@@ -199,10 +208,15 @@ def _field_sql(field_name: str, declaration: Any) -> str:
         escaped_values = ", ".join("'" + value.replace("'", "''") + "'" for value in values)
         return f'TEXT CHECK ("{field_name}" IN ({escaped_values}))' + _constraints(normalized)
 
+    varchar = re.search(r"\b(?:varchar|character varying)\s*\(\s*(\d+)\s*\)", normalized)
     base_type = next((key for key in _TYPE_MAP if re.search(rf"\b{re.escape(key)}\b", normalized)), None)
     if base_type is None:
         raise ValueError(f"field '{field_name}' has unsupported type declaration '{declaration}'")
-    return _TYPE_MAP[base_type] + _constraints(normalized)
+    column_type = f"VARCHAR({varchar.group(1)})" if varchar else _TYPE_MAP[base_type]
+    default = _default_clause(normalized)
+    references = _references_clause(normalized)
+    check = _check_clause(normalized)
+    return column_type + _constraints(normalized) + default + references + check
 
 
 def _constraints(declaration: str) -> str:
@@ -214,6 +228,48 @@ def _constraints(declaration: str) -> str:
     if "unique" in declaration:
         constraints += " UNIQUE"
     return constraints
+
+
+def _default_clause(declaration: str) -> str:
+    match = re.search(r"\bdefault\s+(.+?)(?=\s+(?:references|on\s+delete|check)\b|$)", declaration)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if value in {"current_date", "current_timestamp", "true", "false"} or re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value):
+        return f" DEFAULT {value.upper() if value.startswith('current_') else value.upper() if value in {'true', 'false'} else value}"
+    if re.fullmatch(r"'[^']*'", value):
+        return f" DEFAULT {value}"
+    raise ValueError(f"unsupported default value '{value}'")
+
+
+def _references_clause(declaration: str) -> str:
+    match = re.search(r"\breferences\s+([a-z_][a-z0-9_]*)\s*\(\s*([a-z_][a-z0-9_]*)\s*\)(\s+on\s+delete\s+(?:restrict|cascade|set null))?", declaration)
+    if not match:
+        return ""
+    table_name, field_name, on_delete = match.groups()
+    _validate_identifier(table_name, "referenced table")
+    _validate_identifier(field_name, "referenced field")
+    return f" REFERENCES {table_name}({field_name}){on_delete.upper() if on_delete else ''}"
+
+
+def _check_clause(declaration: str) -> str:
+    match = re.search(r"\bcheck\s*(\([a-z_][a-z0-9_]*\s+in\s+\([^)]*\)\))", declaration)
+    if not match:
+        return ""
+    expression = match.group(1)
+    return f" CHECK {expression}"
+
+
+def _index_parts(index_specification: Any, table_name: str) -> tuple[str, bool]:
+    if not isinstance(index_specification, str) or not index_specification.strip():
+        raise ValueError(f"index for table '{table_name}' must be a field name or INDEX(field)/UNIQUE(field)")
+    specification = index_specification.strip()
+    match = re.fullmatch(r"(?:(UNIQUE|INDEX)\s*\(\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\)?", specification, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"unsupported index declaration '{index_specification}' on table '{table_name}'")
+    kind, field_name = match.groups()
+    _validate_identifier(field_name, f"index field for table '{table_name}'")
+    return field_name, (kind or "").upper() == "UNIQUE"
 
 
 def _relationship_parts(table_name: str, relationship: Any) -> tuple[str, str, str]:

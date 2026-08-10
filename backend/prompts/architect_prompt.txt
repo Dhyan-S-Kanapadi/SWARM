@@ -12,7 +12,7 @@ long explanatory text inside JSON values.
 The JSON object must contain exactly these top-level keys:
 - tech_stack: object with keys frontend, backend, database, styling, testing, local_run_strategy
 - app_shell: object with keys app_name, navigation, primary_dashboard_widgets, empty_states, responsive_requirements
-- database_schema: object describing tables, fields, required fields, indexes, relationships, and seed records
+- database_schema: object whose direct keys are table names; every table value has fields, indexes, relationships, and seed_records. Do not wrap tables in a "tables" array.
 - api_routes: array of objects with method, path, description, request_body, response_shape, validation_rules
 - ui_screens: array of objects with keys name, route, purpose, data_needed, primary_actions, states
 - project_modules: array of objects with keys name, responsibility, files
@@ -23,10 +23,14 @@ The JSON object must contain exactly these top-level keys:
 - folder_structure: string containing a readable project tree
 - build_constraints: array of constraints the builder must obey
 
+Optional authentication contract: include an ``auth`` object only when authentication is actually required. It must contain ``required: true`` and may contain ``protected_paths``. Never declare an ``/api/auth/...`` route unless this auth object is present.
+
 Architecture rules:
 - Make the app runnable with local commands after dependency install. Avoid paid services and external infrastructure.
 - Prefer React with Material UI or another already-declared frontend stack, Node.js with Express for backend, and PostgreSQL for persistence. Include clear local Docker and environment setup for PostgreSQL.
 - Every important UI screen must map to APIs, data entities, and validation rules.
+- Every ui_screens.data_needed item must be an exact declared API path beginning with /api/; never use labels such as "loan counts" or "dashboard data" there.
+- Every api_routes.validation_rules value must be an array of strings, even when there is only one rule.
 - Include local-language support as a first-class architecture concern: language files, locale switcher, formatting, and translated demo copy.
 - Include seed data so the generated app is impressive immediately after startup.
 - Include tests/checks the builder can run before submitting files.

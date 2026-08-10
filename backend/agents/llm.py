@@ -340,7 +340,7 @@ def _repair_token_cap(agent_name: str, token_cap: int) -> int:
     default_cap = min(4800, max(token_cap + 1200, round(token_cap * 1.4)))
     configured = os.getenv(f"LLM_{key}_REPAIR_MAX_TOKENS") or os.getenv(f"GROQ_{key}_REPAIR_MAX_TOKENS")
     try:
-        return max(token_cap, int(configured if configured is not None else default_cap))
+        return max(512, int(configured if configured is not None else default_cap))
     except ValueError:
         return default_cap
 
