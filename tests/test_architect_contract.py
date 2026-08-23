@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.agents.architect import (
+    ArchitectureContractError,
     complete_known_contract_defaults,
     fallback_architecture,
     run_architect,
@@ -90,14 +91,29 @@ class ArchitectContractTests(unittest.TestCase):
         self.assertEqual(completed["database_schema"], {"work_items": work_items})
         validate_architecture_contract(completed)
 
-    def test_screen_data_labels_are_replaced_with_declared_read_routes(self) -> None:
+    def test_screen_data_labels_are_repaired_instead_of_silently_replaced(self) -> None:
         architecture = fallback_architecture({})
         architecture["ui_screens"][0]["data_needed"] = ["record counts"]
 
         completed = complete_known_contract_defaults(architecture)
 
-        self.assertEqual(completed["ui_screens"][0]["data_needed"], ["/api/health", "/api/items", "/api/metrics"])
-        validate_architecture_contract(completed)
+        self.assertEqual(completed["ui_screens"][0]["data_needed"], ["record counts"])
+        with self.assertRaisesRegex(ArchitectureContractError, "needs missing API route"):
+            validate_architecture_contract(completed)
+
+    def test_duplicate_api_endpoint_is_rejected(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"].append(dict(architecture["api_routes"][1]))
+
+        with self.assertRaisesRegex(ArchitectureContractError, "api route is duplicated"):
+            validate_architecture_contract(architecture)
+
+    def test_invalid_api_method_is_rejected(self) -> None:
+        architecture = fallback_architecture({})
+        architecture["api_routes"][1]["method"] = "FETCH"
+
+        with self.assertRaisesRegex(ArchitectureContractError, "unsupported method"):
+            validate_architecture_contract(architecture)
 
     def test_route_validation_rule_string_is_normalized_to_a_list(self) -> None:
         architecture = fallback_architecture({})

@@ -18,7 +18,10 @@ class GraphOrchestrationTests(unittest.TestCase):
             }
         )
 
-        self.assertIn('"orchestration": "langgraph:schema_apply->generate_api_routes->generate_ui_screens->scaffold_auth"', context)
+        self.assertIn(
+            '"orchestration": "langgraph:validate_architecture->schema_apply->workspace_prepare->openhands_author_source->validate_generated_app"',
+            context,
+        )
 
     def test_post_builder_continuation_executes_pitcher_as_a_graph_node(self) -> None:
         calls: list[str] = []

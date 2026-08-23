@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from backend.agents.architect import fallback_architecture, validate_architecture_contract
 from backend.agents.builder import run_builder
-from backend.agents.builder_agent.agent import run_build
+from backend.agents.builder_agent.agent import _openhands_task, run_build, run_deterministic_build
 from backend.agents.builder_agent.database import database_url_for_namespace
 from backend.agents.builder_agent.tools.generate_ui_screens import generate_ui_screens
 from backend.agents.builder_agent.tools.generate_api_routes import generate_api_routes
@@ -48,7 +48,7 @@ class BuilderAgentTests(unittest.TestCase):
         return_value={"tables_created": [], "errors": [], "sql": []},
     )
     def test_run_build_returns_complete_npm_project(self, _schema_apply) -> None:
-        files = run_build(self.architecture, "builder-unit-test")
+        files = run_deterministic_build(self.architecture, "builder-unit-test")
 
         self.assertTrue(RUNNABLE_FILES <= set(files))
         package = json.loads(files["package.json"])
@@ -64,7 +64,7 @@ class BuilderAgentTests(unittest.TestCase):
         return_value={"tables_created": [], "errors": [], "sql": []},
     )
     def test_auth_tool_is_skipped_without_requirement(self, _schema_apply, auth_tool) -> None:
-        run_build(self.architecture, "builder-no-auth")
+        run_deterministic_build(self.architecture, "builder-no-auth")
         auth_tool.assert_not_called()
 
     @patch(
@@ -75,7 +75,7 @@ class BuilderAgentTests(unittest.TestCase):
         architecture = deepcopy(self.architecture)
         architecture["auth"] = {"required": True, "protected_paths": ["/api/items"]}
 
-        files = run_build(architecture, "builder-with-auth")
+        files = run_deterministic_build(architecture, "builder-with-auth")
         package = json.loads(files["package.json"])
 
         self.assertIn("server/auth.js", files)
@@ -103,11 +103,84 @@ class BuilderAgentTests(unittest.TestCase):
 
         result = run_builder(state)
 
-        graph_run_build.assert_called_once_with(self.architecture, "pipeline-builder-test")
+        graph_run_build.assert_called_once_with(
+            self.architecture, "pipeline-builder-test", {}, "Salon tracker"
+        )
         write_code_files.assert_called_once_with("pipeline-builder-test", generated)
         self.assertIs(result["code_files"], generated)
         self.assertEqual(result["agent_statuses"]["builder"], "done")
-        self.assertEqual(result["llm_calls"][-1]["provider"], "langgraph")
+        self.assertEqual(result["llm_calls"][-1]["provider"], "openhands")
+
+    @patch.dict(
+        os.environ,
+        {
+            "DATABASE_URL": "",
+            "OPENHANDS_ENABLED": "true",
+            "OPENHANDS_MODEL": "openrouter/test",
+            "OPENHANDS_API_KEY": "key",
+        },
+        clear=True,
+    )
+    @patch("backend.agents.builder_agent.agent.write_json")
+    @patch("backend.agents.builder_agent.agent._validate_workspace", return_value={"status": "passed", "checks": []})
+    @patch("backend.agents.builder_agent.agent._run_openhands_authoring", return_value={"final_message": "done"})
+    @patch("backend.agents.builder_agent.agent.apply_database_schema", return_value={"tables_created": [], "errors": [], "sql": []})
+    def test_run_build_uses_openhands_created_source_files(
+        self, _schema_apply, _openhands, _validate, write_json
+    ) -> None:
+        def create_sources(_config, workspace, *_args):
+            for relative_path, content in {
+                "package.json": '{"scripts":{"build":"vite build"}}',
+                "index.html": '<div id="root"></div><script type="module" src="/src/main.jsx"></script>',
+                "src/main.jsx": "import './App.jsx';",
+                "src/App.jsx": "export default function App(){return <main>Task tracker</main>}",
+                "server/index.js": "import express from 'express';",
+            }.items():
+                path = workspace / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            return {"final_message": "created files"}
+
+        _openhands.side_effect = create_sources
+
+        files = run_build(self.architecture, "builder-openhands-test", {}, "Task tracker")
+
+        self.assertIn("src/App.jsx", files)
+        self.assertIn("Task tracker", files["src/App.jsx"])
+        diagnostics = write_json.call_args.args[2]
+        self.assertEqual(diagnostics["mode"], "openhands_primary")
+        self.assertTrue(diagnostics["source_files_changed"])
+
+    @patch.dict(
+        os.environ,
+        {"DATABASE_URL": "", "OPENHANDS_ENABLED": "true", "OPENHANDS_MODEL": "", "OPENHANDS_API_KEY": ""},
+        clear=True,
+    )
+    @patch("backend.agents.builder_agent.agent.write_json")
+    @patch(
+        "backend.agents.builder_agent.builder_graph.apply_database_schema",
+        return_value={"tables_created": [], "errors": [], "sql": []},
+    )
+    @patch("backend.agents.builder_agent.agent.apply_database_schema", return_value={"tables_created": [], "errors": [], "sql": []})
+    def test_run_build_reports_deterministic_fallback_when_openhands_is_unconfigured(
+        self, _primary_schema, _fallback_schema, write_json
+    ) -> None:
+        with (
+            patch("backend.agents.builder_agent.agent.load_dotenv"),
+            patch("backend.agents.builder_agent.agent._openhands_config", return_value=None),
+        ):
+            files = run_build(self.architecture, "builder-fallback-test")
+
+        self.assertIn("src/App.jsx", files)
+        diagnostics = write_json.call_args.args[2]
+        self.assertEqual(diagnostics["mode"], "deterministic_fallback")
+        self.assertIn("fallback_reason", diagnostics)
+
+    def test_openhands_task_declares_windows_powershell_constraints(self) -> None:
+        prompt = _openhands_task(self.architecture, {}, "Task tracker")
+
+        self.assertIn("Windows PowerShell", prompt)
+        self.assertIn("Do not use Bash", prompt)
 
     def test_fallback_translates_nested_seed_data_to_schema_rows(self) -> None:
         architecture = fallback_architecture(

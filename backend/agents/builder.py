@@ -6,7 +6,7 @@ import json
 
 from backend.agents.builder_agent.agent import run_build
 from backend.state import ProjectState
-from backend.utils import complete_agent, set_agent_status, write_code_files, write_text
+from backend.utils import complete_agent, output_dir, set_agent_status, write_code_files, write_text
 
 
 def format_builder_context(state: ProjectState) -> str:
@@ -17,7 +17,10 @@ def format_builder_context(state: ProjectState) -> str:
             "idea": state.get("idea", ""),
             "requirements": state.get("requirements", {}),
             "architecture": state.get("architecture", {}),
-            "orchestration": "langgraph:schema_apply->generate_api_routes->generate_ui_screens->scaffold_auth",
+            "orchestration": (
+                "langgraph:validate_architecture->schema_apply->workspace_prepare->"
+                "openhands_author_source->validate_generated_app"
+            ),
         },
         indent=2,
         sort_keys=True,
@@ -32,10 +35,29 @@ def run_builder(state: ProjectState) -> ProjectState:
     write_text(state["run_id"], "builder_prompt.txt", state["builder_prompt"])
 
     try:
-        state["code_files"] = run_build(state["architecture"], state["run_id"])
-        state.setdefault("llm_calls", []).append(
-            {"agent": "builder", "provider": "langgraph", "status": "success"}
+        state["code_files"] = run_build(
+            state["architecture"],
+            state["run_id"],
+            state.get("requirements", {}),
+            state.get("idea", ""),
         )
+        build_diagnostics = _read_openhands_build(state["run_id"])
+        state["openhands_build"] = build_diagnostics
+        if build_diagnostics.get("mode") == "deterministic_fallback":
+            state.setdefault("errors", []).append(
+                f"Builder used deterministic fallback: {build_diagnostics.get('fallback_reason', 'unknown reason')}"
+            )
+            state.setdefault("llm_calls", []).append(
+                {"agent": "builder", "provider": "langgraph", "status": "fallback"}
+            )
+        else:
+            state.setdefault("llm_calls", []).append(
+                {
+                    "agent": "builder",
+                    "provider": build_diagnostics.get("provider", "openhands"),
+                    "status": "success",
+                }
+            )
     except Exception:
         set_agent_status(state, "builder", "error")
         state["fatal_error"] = True
@@ -44,3 +66,13 @@ def run_builder(state: ProjectState) -> ProjectState:
     write_code_files(state["run_id"], state["code_files"])
     complete_agent(state, "builder")
     return state
+
+
+def _read_openhands_build(run_id: str) -> dict:
+    path = output_dir(run_id) / "openhands_build.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}

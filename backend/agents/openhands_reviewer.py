@@ -8,10 +8,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from openhands.sdk import LLM, Conversation
-from openhands.sdk.event import MessageEvent
-from openhands.tools.preset.default import get_default_agent
-
 from backend.state import ProjectState
 from backend.utils import (
     complete_agent,
@@ -105,6 +101,11 @@ def _openhands_config() -> dict[str, str] | None:
 
 
 def _run_openhands_build(config: dict[str, str], workspace: Path, state: ProjectState) -> dict[str, Any]:
+    # Loading the SDK only for an enabled live build keeps the graph importable
+    # when OpenHands is intentionally disabled in local tests.
+    from openhands.sdk import LLM, Conversation
+    from openhands.tools.preset.default import get_default_agent
+
     timeout_seconds = _positive_int_env(
         "OPENHANDS_REVIEW_TIMEOUT_SECONDS", _DEFAULT_REVIEW_TIMEOUT_SECONDS
     )
@@ -160,7 +161,9 @@ def _build_task(state: ProjectState) -> str:
     )
 
 
-def _final_agent_message(conversation: Conversation) -> str:
+def _final_agent_message(conversation: Any) -> str:
+    from openhands.sdk.event import MessageEvent
+
     for event in reversed(list(conversation.state.events)):
         if isinstance(event, MessageEvent) and event.source == "agent":
             parts = [content.text for content in event.llm_message.content if hasattr(content, "text")]

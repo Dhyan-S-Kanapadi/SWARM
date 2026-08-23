@@ -9,6 +9,7 @@ from backend.utils import complete_agent, load_prompt, set_agent_status, write_j
 
 MAX_TOKENS = 4800
 MAX_REPAIR_ATTEMPTS = 2
+ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 REQUIRED_ARCHITECTURE_FIELDS = {
     "tech_stack",
     "app_shell",
@@ -179,11 +180,10 @@ def complete_known_contract_defaults(candidate: dict) -> dict:
                 normalized_screens.append(screen)
                 continue
             data_needed = screen.get("data_needed")
-            valid_paths = [path for path in data_needed if path in route_paths] if isinstance(data_needed, list) else []
             normalized_screens.append(
                 {
                     **screen,
-                    "data_needed": valid_paths or read_paths,
+                    "data_needed": read_paths if data_needed is None else data_needed,
                 }
             )
         completed["ui_screens"] = normalized_screens
@@ -478,7 +478,7 @@ def validate_architecture_contract(architecture: dict) -> None:
     if not isinstance(database_schema, dict) or not database_schema:
         raise ArchitectureContractError("database_schema must define at least one table")
     for table_name, table in database_schema.items():
-        if not isinstance(table, dict) or not isinstance(table.get("fields"), dict):
+        if not isinstance(table, dict) or not isinstance(table.get("fields"), dict) or not table["fields"]:
             raise ArchitectureContractError(f"table {table_name} must define fields")
         fields = set(table["fields"])
         seed_records = table.get("seed_records", [])
@@ -496,15 +496,32 @@ def validate_architecture_contract(architecture: dict) -> None:
     if not isinstance(architecture["api_routes"], list) or not architecture["api_routes"]:
         raise ArchitectureContractError("api_routes must be a non-empty list")
     route_paths = set()
+    route_endpoints = set()
     for route in architecture["api_routes"]:
         if not isinstance(route, dict):
             raise ArchitectureContractError("api_routes entries must be objects")
         route_missing = {"method", "path", "description", "request_body", "response_shape", "validation_rules"} - set(route)
         if route_missing:
             raise ArchitectureContractError(f"api route is missing fields: {', '.join(sorted(route_missing))}")
+        method = route["method"]
         path = route["path"]
-        if not isinstance(path, str) or not path.startswith("/api/"):
+        if not isinstance(method, str) or method.upper() not in ALLOWED_HTTP_METHODS:
+            raise ArchitectureContractError(f"api route has unsupported method: {method!r}")
+        if method != method.upper():
+            raise ArchitectureContractError(f"api route method must be uppercase: {method!r}")
+        if not isinstance(path, str) or not path.startswith("/api/") or any(char.isspace() for char in path):
             raise ArchitectureContractError("api route paths must start with /api/")
+        endpoint = (method, path)
+        if endpoint in route_endpoints:
+            raise ArchitectureContractError(f"api route is duplicated: {method} {path}")
+        route_endpoints.add(endpoint)
+        if not isinstance(route["description"], str) or not route["description"].strip():
+            raise ArchitectureContractError(f"api route {method} {path} must have a description")
+        if route["request_body"] is not None and not isinstance(route["request_body"], dict):
+            raise ArchitectureContractError(f"api route {method} {path} request_body must be an object or null")
+        rules = route["validation_rules"]
+        if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
+            raise ArchitectureContractError(f"api route {method} {path} validation_rules must be a list of strings")
         route_paths.add(path)
 
     auth_config = architecture.get("auth")
@@ -525,7 +542,16 @@ def validate_architecture_contract(architecture: dict) -> None:
         screen_missing = {"name", "route", "purpose", "data_needed", "primary_actions", "states"} - set(screen)
         if screen_missing:
             raise ArchitectureContractError(f"ui screen is missing fields: {', '.join(sorted(screen_missing))}")
-        for path in screen.get("data_needed", []):
+        if not isinstance(screen["name"], str) or not screen["name"].strip():
+            raise ArchitectureContractError("ui screen name must be a non-empty string")
+        if not isinstance(screen["route"], str) or not screen["route"].startswith("/"):
+            raise ArchitectureContractError(f"screen {screen['name']} route must start with /")
+        data_needed = screen["data_needed"]
+        if not isinstance(data_needed, list) or not data_needed or not all(isinstance(path, str) for path in data_needed):
+            raise ArchitectureContractError(f"screen {screen['name']} data_needed must be a non-empty list of API paths")
+        if not isinstance(screen["primary_actions"], list) or not isinstance(screen["states"], list):
+            raise ArchitectureContractError(f"screen {screen['name']} actions and states must be lists")
+        for path in data_needed:
             if path not in route_paths:
                 raise ArchitectureContractError(
                     f"screen {screen.get('name', '(unnamed)')} needs missing API route {path}"
